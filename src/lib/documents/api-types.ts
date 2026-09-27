@@ -51,6 +51,15 @@ export interface DocumentListResponse {
 	pageSize: number;
 }
 
+/** An audit-log entry about one document, for its Approval Timeline. */
+export interface DocumentActivityDTO {
+	id: number;
+	action: string;
+	actor: string;
+	details: string | null;
+	createdAt: string;
+}
+
 export interface DocumentListQuery {
 	search?: string;
 	status?: DocumentStatus;

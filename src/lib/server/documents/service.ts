@@ -8,12 +8,14 @@ import {
 	inArray,
 	isNotNull,
 	isNull,
+	ne,
 	or,
 	sql,
 	type SQL
 } from 'drizzle-orm';
 import type { AuthUser } from '$lib/auth/types';
 import type {
+	DocumentActivityDTO,
 	DocumentDetailDTO,
 	DocumentDTO,
 	DocumentListQuery,
@@ -256,6 +258,34 @@ export function getDocumentDetail(user: AuthUser, id: string): DocumentDetailDTO
 		...toDocumentDTO(row, versions),
 		versions: versions.map((v) => ({ ...toVersionSummary(v), extractedText: v.extractedText }))
 	};
+}
+
+/**
+ * The document's audit trail, oldest first. Downloads and previews are left
+ * out: they're in the system log, but would drown the timeline.
+ */
+export function listDocumentActivity(user: AuthUser, id: string): DocumentActivityDTO[] {
+	loadDocument(user, id);
+	const { activityLog } = schema;
+	return db
+		.select({
+			id: activityLog.id,
+			action: activityLog.action,
+			actor: activityLog.actorName,
+			details: activityLog.details,
+			createdAt: activityLog.createdAt
+		})
+		.from(activityLog)
+		.where(
+			and(
+				eq(activityLog.targetType, 'document'),
+				eq(activityLog.targetId, id),
+				ne(activityLog.action, 'downloaded')
+			)
+		)
+		.orderBy(activityLog.createdAt, activityLog.id)
+		.all()
+		.map((row) => ({ ...row, createdAt: row.createdAt.toISOString() }));
 }
 
 /** The file to serve: a given version number, or the latest. */

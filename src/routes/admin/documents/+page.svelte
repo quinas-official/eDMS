@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import {
 		FileText,
 		Table,
@@ -15,25 +17,165 @@
 		Plus,
 		Archive,
 		History,
-		ArrowRight,
 		ChevronDown,
+		ChevronLeft,
+		ChevronRight,
 		Download,
-		FileX
+		FileX,
+		LoaderCircle
 	} from '@lucide/svelte';
 	import UploadDropzone from '$lib/components/site/UploadDropzone.svelte';
 	import DocumentPreview from '$lib/components/site/DocumentPreview.svelte';
-	import { docxToText, formatFileSize, previewKind } from '$lib/documents/preview';
+	import { formatFileSize } from '$lib/documents/preview';
 	import { diffWords } from 'diff';
 	import { Button } from '$lib/components/ui/button';
 	import { StatusBadge } from '$lib/components/ui/status-badge';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
-	import { departmentNames } from '$lib/departments/store';
-	import { settings } from '$lib/settings/store';
-	import { toAcceptAttribute } from '$lib/settings/types';
-	import { logActivity as recordActivity } from '$lib/activity/store';
-	import type { ActivityAction, ActivityLog } from '$lib/activity/types';
+	import { ApiError } from '$lib/api/client';
+	import {
+		createDocument,
+		deleteDocument as apiDeleteDocument,
+		fetchDocumentFile,
+		getDocument,
+		listDocumentActivity,
+		listDocuments,
+		restoreDocument as apiRestoreDocument,
+		updateDocument,
+		uploadVersion
+	} from '$lib/api/documents';
+	import { listDepartments, type DepartmentDTO } from '$lib/api/departments';
+	import { getServerSettings } from '$lib/api/settings';
+	import type {
+		DocumentActivityDTO,
+		DocumentDetailDTO,
+		DocumentDTO,
+		DocumentListQuery,
+		DocumentStatus,
+		DocumentUpdate,
+		DocumentVersionDTO
+	} from '$lib/documents/api-types';
+	import { DEFAULT_SETTINGS, toAcceptAttribute, type AppSettings } from '$lib/settings/types';
 	import { currentUser } from '$lib/auth/store';
-	import { can } from '$lib/permissions';
+	import { can, isAdmin } from '$lib/permissions';
+
+	const PAGE_SIZE = 25;
+	const STATUSES: DocumentStatus[] = ['draft', 'pending', 'reviewed', 'approved', 'rejected'];
+	/** With "Require approval" on, only approvers can move a document into these. */
+	const DECISIONS: DocumentStatus[] = ['reviewed', 'approved', 'rejected'];
+
+	function statusLabel(status: string) {
+		return status.charAt(0).toUpperCase() + status.slice(1);
+	}
+
+	function errorMessage(err: unknown) {
+		return err instanceof ApiError || err instanceof Error ? err.message : 'Something went wrong';
+	}
+
+	function formatTime(iso: string) {
+		return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+	}
+
+	function formatDate(iso: string) {
+		return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
+	}
+
+	// ---- Server state ---------------------------------------------------------
+	// Settings come from the server, which enforces them; the Settings page's
+	// browser-local copy can differ until it moves onto the API too.
+
+	let appSettings: AppSettings = structuredClone(DEFAULT_SETTINGS);
+	let departments: DepartmentDTO[] = [];
+
+	/** A failed action (delete, restore, loading departments), shown above the list. */
+	let actionError = '';
+
+	onMount(async () => {
+		try {
+			[departments, appSettings] = await Promise.all([listDepartments(), getServerSettings()]);
+		} catch (err) {
+			actionError = errorMessage(err);
+		}
+	});
+
+	$: canUpload = can($currentUser, 'upload');
+	$: canApprove = can($currentUser, 'approve');
+	$: canDeleteDocs = can($currentUser, 'delete');
+	/** Mirrors the server: admins and approvers can file under any department. */
+	$: seesAllDepartments = isAdmin($currentUser) || canApprove;
+	$: decisionsLocked = appSettings.documents.requireApproval && !canApprove;
+
+	/** Approved documents are frozen for everyone but approvers; deleted ones for everyone. */
+	$: isLocked = (doc: DocumentDTO) =>
+		!!doc.deletedAt || (doc.status === 'approved' && !canApprove);
+	$: canEditContent = (doc: DocumentDTO) => canUpload && !isLocked(doc);
+	$: canChangeStatus = (doc: DocumentDTO) => (canUpload || canApprove) && !isLocked(doc);
+
+	function statusOptionDisabled(status: DocumentStatus, current?: DocumentStatus) {
+		return decisionsLocked && DECISIONS.includes(status) && status !== current;
+	}
+
+	// ---- List -----------------------------------------------------------------
+
+	let docs: DocumentDTO[] = [];
+	let total = 0;
+	let page = 1;
+	let loading = true;
+	let listError = '';
+
+	let search = '';
+	let debouncedSearch = '';
+	let selectedDepartment = '';
+	let selectedStatus: DocumentStatus | '' = '';
+	let showDeleted = false;
+	let viewMode: 'table' | 'cards' = 'table';
+
+	// Any filter change goes back to the first page.
+	let searchTimer: ReturnType<typeof setTimeout>;
+	function handleSearchInput() {
+		clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => {
+			debouncedSearch = search.trim();
+			page = 1;
+		}, 250);
+	}
+
+	$: query = {
+		search: debouncedSearch || undefined,
+		status: selectedStatus || undefined,
+		departmentId: selectedDepartment ? Number(selectedDepartment) : undefined,
+		deleted: showDeleted,
+		page,
+		pageSize: PAGE_SIZE
+	} satisfies DocumentListQuery;
+
+	$: if (browser) load(query);
+
+	// Responses can arrive out of order while typing; only the latest request wins.
+	let loadSeq = 0;
+
+	async function load(q: DocumentListQuery) {
+		const seq = ++loadSeq;
+		loading = true;
+		listError = '';
+		try {
+			const res = await listDocuments(q);
+			if (seq !== loadSeq) return;
+			docs = res.documents;
+			total = res.total;
+		} catch (err) {
+			if (seq === loadSeq) listError = errorMessage(err);
+		} finally {
+			if (seq === loadSeq) loading = false;
+		}
+	}
+
+	function refresh() {
+		return load(query);
+	}
+
+	$: pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+	// ---- Upload ---------------------------------------------------------------
 
 	/** Files the dropzone turned away, shown until the next successful upload. */
 	let uploadErrors: string[] = [];
@@ -42,326 +184,218 @@
 		uploadErrors = event.detail.map((r) => `${r.file.name} — ${r.reason}`);
 	}
 
-	let documents: DocumentItem[] = [
-		{
-			id: 'HR-2024-091',
-			title: 'Employee Handbook Update',
-			department: 'HR',
-			status: 'Approved',
-			createdAt: '2024-12-20'
-		},
-		{
-			id: 'FIN-2024-014',
-			title: 'Budget Proposal Q1',
-			department: 'Finance',
-			status: 'Pending',
-			createdAt: '2024-12-22'
-		},
-		{
-			id: 'IT-REQ-332',
-			title: 'Server Upgrade Request',
-			department: 'IT',
-			status: 'Rejected',
-			createdAt: '2024-12-18'
-		},
-		{
-			id: 'LEGAL-2024-055',
-			title: 'Contract Review',
-			department: 'Legal',
-			status: 'Draft',
-			createdAt: '2024-12-21'
-		},
-		{
-			id: 'HR-2024-092',
-			title: 'Holiday Policy Update',
-			department: 'HR',
-			status: 'Pending',
-			createdAt: '2024-12-23'
-		}
-	];
-
-	let search = '';
-	let selectedDepartment = 'All';
-	let selectedStatus = 'All';
-	let viewMode: 'table' | 'cards' = 'table';
-
-	$: filteredDocuments = documents.filter((doc) => {
-		if (doc.deletedAt) return false;
-		const matchesSearch =
-			doc.title.toLowerCase().includes(search.toLowerCase()) ||
-			doc.id.toLowerCase().includes(search.toLowerCase());
-		const matchesDepartment = selectedDepartment === 'All' || doc.department === selectedDepartment;
-		const matchesStatus = selectedStatus === 'All' || doc.status === selectedStatus;
-		return matchesSearch && matchesDepartment && matchesStatus;
-	});
-
 	let showModal = false;
 	let currentFile: File | null = null;
+	let saving = false;
+	let formError = '';
 
-	// Form fields for modal
+	// Form fields for the new-document modal
 	let title = '';
-	let department = '';
-	let status: DocumentStatus = 'Draft';
+	let departmentId = '';
+	let status: DocumentStatus = 'draft';
 	let description = '';
+
+	/** Where the server would file it by default: admins the org default, everyone else their own. */
+	function defaultDepartmentId(): number | null {
+		const user = $currentUser;
+		if (isAdmin(user)) {
+			return (
+				departments.find((d) => d.name === appSettings.general.defaultDepartment)?.id ??
+				user?.departmentId ??
+				null
+			);
+		}
+		return user?.departmentId ?? null;
+	}
 
 	function handleSelect(event: CustomEvent<File[]>) {
 		uploadErrors = [];
+		formError = '';
 		currentFile = event.detail[0];
 		showModal = true;
 
-		// Pre-fill from the filename and the organization defaults in Settings.
 		title = currentFile.name;
-		department = $settings.general.defaultDepartment;
-		status = initialStatus();
+		departmentId = String(defaultDepartmentId() ?? '');
+		// With approval required a new document starts as a Draft; without it, published.
+		status = appSettings.documents.requireApproval ? 'draft' : 'approved';
 		description = '';
 	}
 
-	/**
-	 * With approval required a new document must start as a Draft; with it off an
-	 * admin can publish straight away.
-	 */
-	function initialStatus(): DocumentStatus {
-		return $settings.documents.requireApproval ? 'Draft' : 'Approved';
-	}
-
 	function cancelUpload() {
+		if (saving) return;
 		showModal = false;
 		currentFile = null;
 	}
 
-	// ---- Preview --------------------------------------------------------------
-	// Kept separate from `activeModal` so it can open on top of Manage (from a
-	// Change History card) and drop back to it when closed.
-
-	let previewDocId: string | null = null;
-	let previewVersionId: string | null = null;
-
-	$: previewDoc = previewDocId ? (documents.find((d) => d.id === previewDocId) ?? null) : null;
-	$: allPreviewVersions = previewDoc?.versions ?? [];
-	$: previewVersions = allPreviewVersions.filter((v) => v.file);
-	$: previewVersion =
-		previewVersions.find((v) => v.id === previewVersionId) ?? previewVersions.at(-1) ?? null;
-
-	function openPreview(doc: DocumentItem, versionId: string | null = null) {
-		previewDocId = doc.id;
-		previewVersionId = versionId;
+	async function submitForm() {
+		if (!currentFile || saving) return;
+		saving = true;
+		formError = '';
+		try {
+			await createDocument({
+				file: currentFile,
+				title: title.trim() || undefined,
+				description: description.trim() || undefined,
+				status,
+				departmentId: departmentId === '' ? null : Number(departmentId)
+			});
+			showModal = false;
+			currentFile = null;
+			await refresh();
+		} catch (err) {
+			formError = errorMessage(err);
+		} finally {
+			saving = false;
+		}
 	}
 
-	function closePreview() {
-		previewDocId = null;
-		previewVersionId = null;
+	// ---- Delete / restore -----------------------------------------------------
+
+	let docPendingDelete: DocumentDTO | null = null;
+
+	async function confirmDeleteDocument() {
+		const doc = docPendingDelete;
+		docPendingDelete = null;
+		if (!doc) return;
+		actionError = '';
+		try {
+			await apiDeleteDocument(doc.id);
+			await refresh();
+		} catch (err) {
+			actionError = errorMessage(err);
+		}
 	}
 
-	function versionLabel(version: DocumentVersion) {
-		return `v${allPreviewVersions.findIndex((v) => v.id === version.id) + 1}`;
+	async function restoreDocument(doc: DocumentDTO) {
+		actionError = '';
+		try {
+			await apiRestoreDocument(doc.id);
+			await refresh();
+		} catch (err) {
+			actionError = errorMessage(err);
+		}
 	}
 
-	async function downloadVersion(version: DocumentVersion) {
-		if (!version.file) return;
-		const { saveAs } = await import('file-saver');
-		saveAs(version.file, version.fileName ?? version.file.name);
-	}
+	// ---- Manage ---------------------------------------------------------------
 
-	function handleWindowKeydown(event: KeyboardEvent) {
-		if (event.key === 'Escape' && previewDocId) closePreview();
-	}
+	let manageOpen = false;
+	let manageLoading = false;
+	let manageError = '';
+	let activeDoc: DocumentDetailDTO | null = null;
+	let activity: DocumentActivityDTO[] = [];
+	let activeTab: 'edit' | 'history' | 'timeline' = 'edit';
 
 	/**
 	 * The Manage form edits these copies, never `activeDoc` itself, so typing
 	 * doesn't change the list and Cancel really discards.
 	 */
 	let editTitle = '';
-	let editDepartment = '';
-	let editStatus: DocumentStatus = 'Draft';
+	let editDescription = '';
+	let editDepartmentId = '';
+	let editStatus: DocumentStatus = 'draft';
+	let updatedFile: File | null = null;
+	let versionNote = '';
+	let replaceFileInput: HTMLInputElement;
 
-	function manageDocument(doc: DocumentItem) {
-		activeDoc = doc;
-		activeModal = 'manage';
+	function setActiveDoc(detail: DocumentDetailDTO) {
+		activeDoc = detail;
+		editTitle = detail.title;
+		editDescription = detail.description;
+		editDepartmentId = String(detail.department?.id ?? '');
+		editStatus = detail.status;
+	}
+
+	async function manageDocument(doc: DocumentDTO) {
+		manageOpen = true;
+		manageLoading = true;
+		manageError = '';
 		activeTab = 'edit';
-		editTitle = doc.title;
-		editDepartment = doc.department;
-		editStatus = doc.status;
-		updatedFile = null;
-		updatedFileText = undefined;
+		activeDoc = null;
+		activity = [];
+		clearReplacementFile();
+		try {
+			const [detail, log] = await Promise.all([getDocument(doc.id), listDocumentActivity(doc.id)]);
+			setActiveDoc(detail);
+			activity = log;
+		} catch (err) {
+			manageError = errorMessage(err);
+		} finally {
+			manageLoading = false;
+		}
 	}
 
 	function closeModal() {
-		activeModal = null;
+		if (saving) return;
+		manageOpen = false;
 		activeDoc = null;
-		updatedFile = null;
-		updatedFileText = undefined;
+		activity = [];
+		clearReplacementFile();
 	}
 
-	let docPendingDelete: DocumentItem | null = null;
-
-	function requestDeleteDocument(doc: DocumentItem) {
-		docPendingDelete = doc;
-	}
-
-	function deleteDocument(doc: DocumentItem) {
-		documents = documents.map((d) =>
-			d.id === doc.id ? { ...d, deletedAt: new Date().toISOString() } : d
-		);
-
-		logActivity(doc, 'deleted');
-	}
-
-	function confirmDeleteDocument() {
-		if (docPendingDelete) deleteDocument(docPendingDelete);
-		docPendingDelete = null;
-	}
-
-	function restoreDocument(doc: DocumentItem) {
-		documents = documents.map((d) => (d.id === doc.id ? { ...d, deletedAt: null } : d));
-		logActivity(doc, 'restored');
-	}
-
-	type ActiveModal = 'manage' | null;
-
-	let activeModal: ActiveModal = null;
-	let activeDoc: DocumentItem | null = null;
-	let activeTab: 'edit' | 'history' | 'timeline' = 'edit';
-
-	type DocumentStatus = 'Draft' | 'Pending' | 'Approved' | 'Rejected';
-
-	type DocumentVersion = {
-		id: string;
-		timestamp: string;
-		editor: string;
-		snapshot: Partial<DocumentItem>;
-		file?: File; // optional, store actual file
-		fileName?: string; // set when this version uploaded a file
-		fileText?: string; // text extracted from DOCX/plain text for diffing
-	};
-
-	// `ActivityLog` now comes from $lib/activity/types — the shared audit log.
-
-	type DocumentItem = {
-		id: string;
-		title: string;
-		department: string;
-		status: DocumentStatus;
-		deletedAt?: string | null;
-		createdAt?: string | null;
-		versions?: DocumentVersion[];
-		activity?: ActivityLog[];
-	};
-
-	// Reactive so the template re-evaluates them when the signed-in user changes.
-	$: canEdit = (doc: DocumentItem) => {
-		if (doc.deletedAt) return false;
-		if (!can($currentUser, 'upload')) return false;
-		if (doc.status === 'Approved') return false;
-		return true;
-	};
-
-	$: canDelete = (doc: DocumentItem) => {
-		if (!can($currentUser, 'delete')) return false;
-		if (doc.deletedAt) return false;
-		return true;
-	};
-
-	/**
-	 * Text used for the content diff in Change History. PDFs, images etc. return
-	 * null: read as text they'd come through as binary noise.
-	 */
-	async function extractFileText(file: File): Promise<string | null> {
-		const kind = previewKind(file);
-		try {
-			if (kind === 'docx') return await docxToText(file);
-			if (kind === 'text') return await file.text();
-		} catch {
-			// Unreadable file: still accept the upload, just without a content diff.
-		}
-		return null;
-	}
-
-	// Create a new version of a document
-	async function createVersion(doc: DocumentItem, file?: File): Promise<DocumentVersion> {
-		let fileText: string | null = null;
-
-		if (file) {
-			fileText = await extractFileText(file);
-		}
-
-		const snapshot: DocumentVersion & { fileText?: string } = {
-			id: crypto.randomUUID(),
-			timestamp: new Date().toISOString(),
-			editor: actor,
-			snapshot: {
-				title: doc.title,
-				department: doc.department,
-				status: doc.status
-			},
-			file,
-			fileName: file?.name,
-			fileText: fileText ?? undefined // convert null -> undefined
-		};
-
-		doc.versions = [...(doc.versions ?? []), snapshot];
-		return snapshot;
-	}
-
-	async function handleFileUpdate(event: Event) {
+	function handleFileUpdate(event: Event) {
 		const input = event.target as HTMLInputElement;
-		if (!input.files?.length) return;
-
-		updatedFile = input.files[0];
-		updatedFileText = (await extractFileText(updatedFile)) ?? undefined;
+		if (input.files?.length) updatedFile = input.files[0];
 	}
 
-	// Submit form for new document
-	async function submitForm() {
-		if (!currentFile) return;
-
-		const newDoc: DocumentItem = {
-			id: `${department?.substring(0, 2).toUpperCase()}-${Date.now()}`,
-			title,
-			department,
-			status,
-			createdAt: new Date().toISOString().split('T')[0],
-			versions: []
-		};
-
-		// Create initial version
-		await createVersion(newDoc, currentFile);
-
-		// Add to documents list
-		documents = [newDoc, ...documents];
-		logActivity(newDoc, 'created', `Uploaded ${currentFile.name}`);
-
-		// Reset modal
-		showModal = false;
-		currentFile = null;
-		title = '';
-		department = '';
-		status = initialStatus();
-		description = '';
+	function clearReplacementFile() {
+		updatedFile = null;
+		versionNote = '';
+		if (replaceFileInput) replaceFileInput.value = '';
 	}
 
-	/**
-	 * Writes to the shared, persisted audit log and mirrors the entry onto the
-	 * document's own trail. The per-document trail is part of version history, so
-	 * it follows the "Enable versioning" setting; the system log always records.
-	 */
-	function logActivity(doc: DocumentItem, action: ActivityAction, details?: string) {
-		const entry = recordActivity(action, {
-			actor,
-			details,
-			target: doc.title,
-			targetId: doc.id
-		});
+	async function saveDocumentChanges() {
+		if (!activeDoc || saving) return;
+		const doc = activeDoc;
 
-		// Look the document up by id rather than mutating `doc`: callers often hold
-		// a copy that has already been replaced in `documents`.
-		if ($settings.documents.enableVersioning) {
-			documents = documents.map((d) =>
-				d.id === doc.id ? { ...d, activity: [...(d.activity ?? []), entry] } : d
-			);
+		const nextTitle = editTitle.trim();
+		if (!nextTitle) {
+			manageError = 'Title is required';
+			return;
+		}
+
+		const update: DocumentUpdate = {};
+		if (nextTitle !== doc.title) update.title = nextTitle;
+		if (editDescription.trim() !== doc.description) update.description = editDescription.trim();
+		const nextDepartment = editDepartmentId === '' ? null : Number(editDepartmentId);
+		if (nextDepartment !== (doc.department?.id ?? null)) update.departmentId = nextDepartment;
+		if (editStatus !== doc.status) update.status = editStatus;
+
+		const hasUpdate = Object.keys(update).length > 0;
+		if (!hasUpdate && !updatedFile) {
+			closeModal();
+			return;
+		}
+
+		saving = true;
+		manageError = '';
+		let uploaded = false;
+		try {
+			// File first: if the edit approves the document, it's locked and an upload after would be refused.
+			if (updatedFile) {
+				await uploadVersion(doc.id, updatedFile, versionNote.trim() || undefined);
+				uploaded = true;
+			}
+			if (hasUpdate) await updateDocument(doc.id, update);
+			saving = false;
+			closeModal();
+			await refresh();
+		} catch (err) {
+			manageError = errorMessage(err);
+			// The file may have gone through before the edit failed; don't upload it twice on retry.
+			if (uploaded) {
+				clearReplacementFile();
+				try {
+					const detail = await getDocument(doc.id);
+					if (activeDoc?.id === doc.id) activeDoc = detail;
+				} catch {
+					// The error above is already on screen.
+				}
+				refresh();
+			}
+		} finally {
+			saving = false;
 		}
 	}
-
-	$: actor = $currentUser?.username ?? 'Unknown';
 
 	/**
 	 * Returns HTML showing GitHub-style diff between two strings
@@ -372,7 +406,7 @@
 
 		return diffs
 			.map((part) => {
-				// The text is user-supplied (titles, file contents) and goes into {@html}.
+				// The text is user-supplied (file contents) and goes into {@html}.
 				const value = escapeHtml(part.value);
 				if (part.added) {
 					return `<span class="diff-add">${value}</span>`;
@@ -394,29 +428,7 @@
 			.replace(/'/g, '&#39;');
 	}
 
-	let updatedFile: File | null = null;
-	let updatedFileText: string | undefined;
-
-	const FIELD_LABELS = { title: 'Title', department: 'Department', status: 'Status' } as const;
-	type TrackedField = keyof typeof FIELD_LABELS;
-	const TRACKED_FIELDS = Object.keys(FIELD_LABELS) as TrackedField[];
-
-	function formatTime(iso: string) {
-		return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-	}
-
-	/** The tracked fields that differ between two versions, in display order. */
-	function versionChanges(prev: DocumentVersion, curr: DocumentVersion) {
-		return TRACKED_FIELDS.filter(
-			(field) => field in curr.snapshot && prev.snapshot[field] !== curr.snapshot[field]
-		).map((field) => ({
-			field,
-			before: String(prev.snapshot[field] ?? ''),
-			after: String(curr.snapshot[field] ?? '')
-		}));
-	}
-
-	const ACTION_STYLES: Record<ActivityAction, { icon: typeof Pencil; class: string }> = {
+	const ACTION_STYLES: Record<string, { icon: typeof Pencil; class: string }> = {
 		created: { icon: Plus, class: 'bg-blue-500/15 text-blue-600 dark:text-blue-300' },
 		edited: { icon: Pencil, class: 'bg-muted text-muted-foreground' },
 		approved: { icon: CircleCheck, class: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300' },
@@ -427,92 +439,128 @@
 		purged: { icon: Trash2, class: 'bg-red-500/15 text-red-600 dark:text-red-300' }
 	};
 
-	let replaceFileInput: HTMLInputElement;
+	// ---- Preview --------------------------------------------------------------
+	// Kept separate from Manage so it can open on top of it (from a Change
+	// History card) and drop back to it when closed.
 
-	function clearReplacementFile() {
-		updatedFile = null;
-		updatedFileText = undefined;
-		if (replaceFileInput) replaceFileInput.value = '';
+	let previewDoc: DocumentDTO | null = null;
+	let previewVersions: DocumentVersionDTO[] = [];
+	let previewVersionNumber: number | null = null;
+	let previewFile: File | null = null;
+	let previewLoading = false;
+	let previewError = '';
+
+	/** Fetched files, keyed by version and content so a replaced file isn't served stale. */
+	// Nothing renders from the cache itself, so it doesn't need to be reactive.
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	const fileCache = new Map<string, File>();
+
+	$: previewVersion = previewVersions.find((v) => v.versionNumber === previewVersionNumber) ?? null;
+
+	async function openPreview(doc: DocumentDTO | DocumentDetailDTO, versionNumber: number | null = null) {
+		previewDoc = doc;
+		previewError = '';
+		previewFile = null;
+		previewVersionNumber = versionNumber;
+		previewVersions = 'versions' in doc ? doc.versions : [];
+
+		if (!('versions' in doc)) {
+			previewLoading = true;
+			try {
+				const detail = await getDocument(doc.id);
+				if (previewDoc?.id !== doc.id) return;
+				previewDoc = detail;
+				previewVersions = detail.versions;
+			} catch (err) {
+				if (previewDoc?.id === doc.id) {
+					previewError = errorMessage(err);
+					previewLoading = false;
+				}
+				return;
+			}
+		}
+
+		await showVersion(versionNumber ?? previewVersions.at(-1)?.versionNumber ?? null);
 	}
 
-
-	function saveDocumentChanges() {
-		if (!activeDoc) return;
-
-		const original = activeDoc;
-		const next = { title: editTitle.trim(), department: editDepartment, status: editStatus };
-		if (!next.title) return;
-
-		const changed = (Object.keys(next) as (keyof typeof next)[]).filter(
-			(field) => original[field] !== next[field]
-		);
-
-		if (!changed.length && !updatedFile) {
-			closeModal();
+	async function showVersion(versionNumber: number | null) {
+		previewVersionNumber = versionNumber;
+		previewFile = null;
+		previewError = '';
+		const doc = previewDoc;
+		const version = previewVersions.find((v) => v.versionNumber === versionNumber);
+		if (!doc || !version) {
+			previewLoading = false;
 			return;
 		}
 
-		const now = new Date().toISOString();
-		let versions = original.versions ?? [];
+		const cached = fileCache.get(cacheKey(version));
+		if (cached) {
+			previewFile = cached;
+			previewLoading = false;
+			return;
+		}
 
-		if ($settings.documents.enableVersioning) {
-			// Seeded documents (and ones created while versioning was off) have no
-			// history yet. Record where they started so this edit shows as a diff
-			// instead of becoming the "initial version".
-			if (!versions.length) {
-				versions = [
-					{
-						id: crypto.randomUUID(),
-						timestamp: original.createdAt ? new Date(original.createdAt).toISOString() : now,
-						editor: 'System',
-						snapshot: {
-							title: original.title,
-							department: original.department,
-							status: original.status
-						}
-					}
-				];
+		previewLoading = true;
+		try {
+			const file = await fetchVersionFile(doc.id, version, true);
+			fileCache.set(cacheKey(version), file);
+			if (previewDoc?.id === doc.id && previewVersionNumber === versionNumber) previewFile = file;
+		} catch (err) {
+			if (previewDoc?.id === doc.id && previewVersionNumber === versionNumber) {
+				previewError = errorMessage(err);
 			}
-
-			versions = [
-				...versions,
-				{
-					id: crypto.randomUUID(),
-					timestamp: now,
-					editor: actor,
-					snapshot: next,
-					file: updatedFile ?? undefined,
-					fileName: updatedFile?.name,
-					fileText: updatedFileText
-				}
-			];
+		} finally {
+			if (previewDoc?.id === doc.id && previewVersionNumber === versionNumber) {
+				previewLoading = false;
+			}
 		}
+	}
 
-		documents = documents.map((d) => (d.id === original.id ? { ...d, ...next, versions } : d));
+	function cacheKey(version: DocumentVersionDTO) {
+		return `${version.id}:${version.sha256}`;
+	}
 
-		const details = [
-			...changed.map((field) => `${FIELD_LABELS[field]}: ${original[field]} → ${next[field]}`),
-			...(updatedFile ? [`File replaced with ${updatedFile.name}`] : [])
-		].join('; ');
+	/** Wrapped in a File with the original name and type, which the preview relies on. */
+	async function fetchVersionFile(docId: string, version: DocumentVersionDTO, inline: boolean) {
+		const blob = await fetchDocumentFile(docId, { version: version.versionNumber, inline });
+		return new File([blob], version.originalName, { type: version.mimeType });
+	}
 
-		logActivity(original, 'edited', details);
-
-		if (changed.includes('status') && (next.status === 'Approved' || next.status === 'Rejected')) {
-			logActivity(original, next.status === 'Approved' ? 'approved' : 'rejected');
+	async function downloadVersion(version: DocumentVersionDTO) {
+		if (!previewDoc) return;
+		try {
+			// Always fetched as a download (not from the preview cache) so it's recorded as one.
+			const file = await fetchVersionFile(previewDoc.id, version, false);
+			const { saveAs } = await import('file-saver');
+			saveAs(file, version.originalName);
+		} catch (err) {
+			previewError = errorMessage(err);
 		}
+	}
 
-		closeModal();
+	function closePreview() {
+		previewDoc = null;
+		previewVersions = [];
+		previewVersionNumber = null;
+		previewFile = null;
+		previewLoading = false;
+		previewError = '';
+	}
+
+	function handleWindowKeydown(event: KeyboardEvent) {
+		if (event.key === 'Escape' && previewDoc) closePreview();
 	}
 </script>
 
 <div class="space-y-6">
 	<!-- Drag-and-Drop Upload -->
-	{#if can($currentUser, 'upload')}
+	{#if canUpload && !showDeleted}
 		<UploadDropzone
 			on:select={handleSelect}
 			on:reject={handleReject}
-			allowedFileTypes={$settings.documents.allowedFileTypes}
-			maxSizeMb={$settings.documents.maxUploadSizeMb}
+			allowedFileTypes={appSettings.documents.allowedFileTypes}
+			maxSizeMb={appSettings.documents.maxUploadSizeMb}
 		/>
 	{/if}
 
@@ -530,6 +578,15 @@
 		</div>
 	{/if}
 
+	{#if actionError}
+		<div class="border-destructive/30 bg-destructive/5 text-destructive flex items-start justify-between gap-3 rounded-lg border p-3 text-sm">
+			<p>{actionError}</p>
+			<button class="hover:bg-destructive/10 rounded-md p-0.5" aria-label="Dismiss" on:click={() => (actionError = '')}>
+				<X class="h-4 w-4" />
+			</button>
+		</div>
+	{/if}
+
 	<!-- Filters + View Toggle -->
 	<div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
 		<div class="flex flex-col gap-2 md:flex-row md:items-center">
@@ -537,27 +594,33 @@
 				type="text"
 				placeholder="Search documents..."
 				bind:value={search}
+				on:input={handleSearchInput}
 				class="border-border/60 focus-visible:ring-ring/50 rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
 			/>
 			<div class="flex items-center gap-2">
 				<label for="doc-filter-department" class="text-muted-foreground shrink-0 text-xs font-medium">Department</label>
-				<select id="doc-filter-department" bind:value={selectedDepartment} class="border-border/60 rounded-lg border bg-transparent px-2 py-2 text-sm shadow-xs">
-					<option>All</option>
-					{#each $departmentNames as name (name)}
-						<option>{name}</option>
+				<select id="doc-filter-department" bind:value={selectedDepartment} on:change={() => (page = 1)} class="border-border/60 rounded-lg border bg-transparent px-2 py-2 text-sm shadow-xs">
+					<option value="">All</option>
+					{#each departments as dept (dept.id)}
+						<option value={String(dept.id)}>{dept.name}</option>
 					{/each}
 				</select>
 			</div>
 			<div class="flex items-center gap-2">
 				<label for="doc-filter-status" class="text-muted-foreground shrink-0 text-xs font-medium">Status</label>
-				<select id="doc-filter-status" bind:value={selectedStatus} class="border-border/60 rounded-lg border bg-transparent px-2 py-2 text-sm shadow-xs">
-					<option>All</option>
-					<option>Draft</option>
-					<option>Pending</option>
-					<option>Approved</option>
-					<option>Rejected</option>
+				<select id="doc-filter-status" bind:value={selectedStatus} on:change={() => (page = 1)} class="border-border/60 rounded-lg border bg-transparent px-2 py-2 text-sm shadow-xs">
+					<option value="">All</option>
+					{#each STATUSES as s (s)}
+						<option value={s}>{statusLabel(s)}</option>
+					{/each}
 				</select>
 			</div>
+			{#if canDeleteDocs}
+				<label class="text-muted-foreground flex items-center gap-2 text-xs font-medium">
+					<input type="checkbox" bind:checked={showDeleted} on:change={() => (page = 1)} class="border-border rounded" />
+					Show deleted
+				</label>
+			{/if}
 		</div>
 
 		<!-- View Mode Buttons -->
@@ -583,97 +646,151 @@
 	</div>
 
 	<!-- Document Display -->
-	{#if filteredDocuments.length > 0}
-		{#if viewMode === 'table'}
-			<div class="bg-card border-border/60 overflow-x-auto rounded-xl border shadow-sm">
-				<table class="w-full text-center text-sm">
-					<thead class="border-border/60 border-b">
-						<tr>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">ID</th>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Title</th>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Department</th>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Status</th>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Date</th>
-							<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Actions</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each filteredDocuments as doc}
-							<tr class="hover:bg-muted/50 border-border/60 border-b transition-colors">
-								<td class="text-muted-foreground px-4 py-3.5">{doc.id}</td>
-								<td class="px-4 py-3.5 font-medium">
-									<button class="hover:underline" on:click={() => openPreview(doc)}>{doc.title}</button>
-								</td>
-								<td class="px-4 py-3.5">{doc.department}</td>
-								<td class="px-4 py-3.5"><StatusBadge status={doc.status} /></td>
-								<td class="text-muted-foreground px-4 py-3.5">{doc.createdAt}</td>
-								<td class="px-4 py-3.5">
-									<div class="inline-flex gap-2">
-										<!-- View -->
-										<button
-											class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
-											on:click={() => openPreview(doc)}
-										>
-											<Eye class="mr-1 h-3.5 w-3.5" /> View
-										</button>
-
-										<!-- Manage -->
-										<button
-											class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
-											on:click={() => manageDocument(doc)}
-										>
-											<Settings class="mr-1 h-3.5 w-3.5" />
-											Manage
-										</button>
-
-										<!-- Delete -->
-										<button
-											disabled={!canDelete(doc)}
-											class="border-destructive/40 text-destructive flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:border-destructive hover:bg-destructive/10 hover:shadow-sm disabled:pointer-events-none disabled:opacity-50"
-											on:click={() => requestDeleteDocument(doc)}
-										>
-											<Trash2 class="mr-1 h-3.5 w-3.5" /> Delete
-										</button>
-									</div>
-								</td>
+	{#if listError}
+		<div
+			class="text-muted-foreground bg-card border-border/60 flex h-80 flex-col items-center justify-center gap-3 rounded-xl border text-center shadow-sm"
+		>
+			<CircleX class="text-destructive h-10 w-10 opacity-60" />
+			<p class="text-foreground text-sm font-medium">Couldn't load documents</p>
+			<p class="text-xs">{listError}</p>
+			<Button variant="outline" size="sm" onclick={refresh}>Try again</Button>
+		</div>
+	{:else if docs.length > 0}
+		<div class="transition-opacity" class:opacity-60={loading}>
+			{#if viewMode === 'table'}
+				<div class="bg-card border-border/60 overflow-x-auto rounded-xl border shadow-sm">
+					<table class="w-full text-center text-sm">
+						<thead class="border-border/60 border-b">
+							<tr>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Reference</th>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Title</th>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Department</th>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Status</th>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">
+									{showDeleted ? 'Deleted' : 'Created'}
+								</th>
+								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Actions</th>
 							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
+						</thead>
+						<tbody>
+							{#each docs as doc (doc.id)}
+								<tr class="hover:bg-muted/50 border-border/60 border-b transition-colors">
+									<td class="text-muted-foreground px-4 py-3.5">{doc.reference}</td>
+									<td class="px-4 py-3.5 font-medium">
+										<button class="hover:underline" on:click={() => openPreview(doc)}>{doc.title}</button>
+									</td>
+									<td class="px-4 py-3.5">{doc.department?.name ?? '—'}</td>
+									<td class="px-4 py-3.5"><StatusBadge status={statusLabel(doc.status)} /></td>
+									<td class="text-muted-foreground px-4 py-3.5">
+										{formatDate(doc.deletedAt ?? doc.createdAt)}
+									</td>
+									<td class="px-4 py-3.5">
+										<div class="inline-flex gap-2">
+											<!-- View -->
+											<button
+												class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
+												on:click={() => openPreview(doc)}
+											>
+												<Eye class="mr-1 h-3.5 w-3.5" /> View
+											</button>
 
-		{#if viewMode === 'cards'}
-			<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-				{#each filteredDocuments as doc}
-					<div class="bg-card border-border/60 flex flex-col rounded-xl border p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
-						<button class="text-left font-semibold tracking-tight hover:underline" on:click={() => openPreview(doc)}>
-							{doc.title}
-						</button>
-						<p class="text-muted-foreground mt-0.5 text-sm">{doc.id}</p>
-						<div class="mt-4 flex items-center justify-between text-sm">
-							<span class="text-muted-foreground">{doc.department}</span>
-							<StatusBadge status={doc.status} />
+											{#if doc.deletedAt}
+												<!-- Restore -->
+												<button
+													class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
+													on:click={() => restoreDocument(doc)}
+												>
+													<RotateCcw class="mr-1 h-3.5 w-3.5" /> Restore
+												</button>
+											{:else}
+												<!-- Manage -->
+												<button
+													class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
+													on:click={() => manageDocument(doc)}
+												>
+													<Settings class="mr-1 h-3.5 w-3.5" />
+													Manage
+												</button>
+
+												<!-- Delete -->
+												<button
+													disabled={!canDeleteDocs}
+													class="border-destructive/40 text-destructive flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:border-destructive hover:bg-destructive/10 hover:shadow-sm disabled:pointer-events-none disabled:opacity-50"
+													on:click={() => (docPendingDelete = doc)}
+												>
+													<Trash2 class="mr-1 h-3.5 w-3.5" /> Delete
+												</button>
+											{/if}
+										</div>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			{/if}
+
+			{#if viewMode === 'cards'}
+				<div class="grid grid-cols-1 gap-4 md:grid-cols-3">
+					{#each docs as doc (doc.id)}
+						<div class="bg-card border-border/60 flex flex-col rounded-xl border p-5 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md">
+							<button class="text-left font-semibold tracking-tight hover:underline" on:click={() => openPreview(doc)}>
+								{doc.title}
+							</button>
+							<p class="text-muted-foreground mt-0.5 text-sm">{doc.reference}</p>
+							<div class="mt-4 flex items-center justify-between text-sm">
+								<span class="text-muted-foreground">{doc.department?.name ?? '—'}</span>
+								<StatusBadge status={statusLabel(doc.status)} />
+							</div>
+							<p class="text-muted-foreground mt-3 text-xs">{formatDate(doc.deletedAt ?? doc.createdAt)}</p>
+							<div class="border-border/60 mt-4 flex gap-2 border-t pt-4">
+								<Button variant="outline" size="sm" class="flex-1" onclick={() => openPreview(doc)}>
+									<Eye class="h-3.5 w-3.5" /> View
+								</Button>
+								{#if doc.deletedAt}
+									<Button variant="outline" size="sm" class="flex-1" onclick={() => restoreDocument(doc)}>
+										<RotateCcw class="h-3.5 w-3.5" /> Restore
+									</Button>
+								{:else}
+									<Button variant="outline" size="sm" class="flex-1" onclick={() => manageDocument(doc)}>
+										<Settings class="h-3.5 w-3.5" /> Manage
+									</Button>
+								{/if}
+							</div>
 						</div>
-						<p class="text-muted-foreground mt-3 text-xs">{doc.createdAt}</p>
-						<div class="border-border/60 mt-4 flex gap-2 border-t pt-4">
-							<Button variant="outline" size="sm" class="flex-1" onclick={() => openPreview(doc)}>
-								<Eye class="h-3.5 w-3.5" /> View
-							</Button>
-							<Button variant="outline" size="sm" class="flex-1" onclick={() => manageDocument(doc)}>
-								<Settings class="h-3.5 w-3.5" /> Manage
-							</Button>
-						</div>
-					</div>
-				{/each}
+					{/each}
+				</div>
+			{/if}
+		</div>
+
+		{#if pageCount > 1}
+			<div class="text-muted-foreground flex items-center justify-between text-sm">
+				<p>
+					{(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
+				</p>
+				<div class="flex gap-2">
+					<Button variant="outline" size="sm" disabled={page <= 1 || loading} onclick={() => (page -= 1)}>
+						<ChevronLeft class="h-4 w-4" /> Previous
+					</Button>
+					<Button variant="outline" size="sm" disabled={page >= pageCount || loading} onclick={() => (page += 1)}>
+						Next <ChevronRight class="h-4 w-4" />
+					</Button>
+				</div>
 			</div>
 		{/if}
 	{:else}
 		<div
 			class="text-muted-foreground bg-card border-border/60 flex h-80 flex-col items-center justify-center gap-2 rounded-xl border text-center shadow-sm"
 		>
-			<FileText class="h-12 w-12 opacity-40" />
-			<h1 class="text-sm font-medium">No documents found matching your filters.</h1>
+			{#if loading}
+				<LoaderCircle class="h-8 w-8 animate-spin opacity-60" />
+				<p class="text-sm">Loading documents…</p>
+			{:else}
+				<FileText class="h-12 w-12 opacity-40" />
+				<h1 class="text-sm font-medium">
+					{showDeleted ? 'No deleted documents.' : 'No documents found matching your filters.'}
+				</h1>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -697,19 +814,28 @@
 						id="new-doc-title"
 						type="text"
 						bind:value={title}
+						maxlength={200}
 						class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
-            required
+						required
 					/>
 				</div>
 
 				<div>
 					<label class="mb-1.5 block text-sm font-medium" for="new-doc-department">Department</label>
-					<select id="new-doc-department" bind:value={department} class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2" required>
-						<option value="" disabled>Select department</option>
-						{#each $departmentNames as name (name)}
-							<option>{name}</option>
+					<select
+						id="new-doc-department"
+						bind:value={departmentId}
+						disabled={!seesAllDepartments}
+						class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2 disabled:opacity-60"
+					>
+						<option value="">No department</option>
+						{#each departments as dept (dept.id)}
+							<option value={String(dept.id)}>{dept.name}</option>
 						{/each}
 					</select>
+					{#if !seesAllDepartments}
+						<p class="text-muted-foreground mt-1.5 text-xs">Documents are filed under your own department.</p>
+					{/if}
 				</div>
 
 				<div>
@@ -717,18 +843,15 @@
 					<select
 						id="new-doc-status"
 						bind:value={status}
-						disabled={$settings.documents.requireApproval}
-						class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2 disabled:opacity-60"
-						required
+						class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
 					>
-						<option>Draft</option>
-						<option>Pending</option>
-						<option>Approved</option>
-						<option>Rejected</option>
+						{#each STATUSES as s (s)}
+							<option value={s} disabled={statusOptionDisabled(s)}>{statusLabel(s)}</option>
+						{/each}
 					</select>
-					{#if $settings.documents.requireApproval}
+					{#if decisionsLocked}
 						<p class="text-muted-foreground mt-1.5 text-xs">
-							Locked to Draft because “Require approval before publish” is on in Settings.
+							“Require approval before publish” is on, so only approvers can review, approve or reject.
 						</p>
 					{/if}
 				</div>
@@ -740,21 +863,27 @@
 						type="text"
 						bind:value={description}
 						class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
-            required
 					/>
 				</div>
 			</div>
 
+			{#if formError}
+				<p class="text-destructive mb-4 text-sm">{formError}</p>
+			{/if}
+
 			<!-- Actions -->
 			<div class="flex justify-end gap-2">
-				<Button variant="outline" onclick={cancelUpload}>Cancel</Button>
-				<Button onclick={submitForm}>Save</Button>
+				<Button variant="outline" onclick={cancelUpload} disabled={saving}>Cancel</Button>
+				<Button onclick={submitForm} disabled={saving}>
+					{#if saving}<LoaderCircle class="h-4 w-4 animate-spin" />{/if}
+					{saving ? 'Uploading…' : 'Save'}
+				</Button>
 			</div>
 		</div>
 	</div>
 {/if}
 
-{#if activeModal === 'manage' && activeDoc}
+{#if manageOpen}
 	<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
 		<div class="max-h-[90vh] w-full max-w-[1000px] overflow-auto bg-card border-border/60 rounded-2xl border p-6 shadow-2xl">
 			<div class="mb-4 flex items-center justify-between">
@@ -764,24 +893,31 @@
 				</button>
 			</div>
 
-			{#if !canEdit(activeDoc)}
-				<div class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
-					This document is locked and read-only.
+			{#if manageLoading}
+				<div class="text-muted-foreground flex flex-col items-center gap-2 py-16 text-sm">
+					<LoaderCircle class="h-8 w-8 animate-spin opacity-60" />
+					Loading document…
 				</div>
-			{/if}
+			{:else if !activeDoc}
+				<p class="text-destructive py-10 text-center text-sm">{manageError || 'Document not found'}</p>
+			{:else}
+				{#if isLocked(activeDoc)}
+					<div class="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+						This document is approved and read-only. An approver can reopen it.
+					</div>
+				{/if}
 
-			<!-- Tabs -->
-			<div class="mb-4 flex border-border/60 border-b">
-				<button
-					class="-mb-px border-b-2 border-transparent px-4 py-2 text-sm font-medium transition-colors"
-					class:border-primary={activeTab === 'edit'}
-					class:text-primary={activeTab === 'edit'}
-					class:text-muted-foreground={activeTab !== 'edit'}
-					on:click={() => (activeTab = 'edit')}
-				>
-					Edit
-				</button>
-				{#if $settings.documents.enableVersioning}
+				<!-- Tabs -->
+				<div class="mb-4 flex border-border/60 border-b">
+					<button
+						class="-mb-px border-b-2 border-transparent px-4 py-2 text-sm font-medium transition-colors"
+						class:border-primary={activeTab === 'edit'}
+						class:text-primary={activeTab === 'edit'}
+						class:text-muted-foreground={activeTab !== 'edit'}
+						on:click={() => (activeTab = 'edit')}
+					>
+						Edit
+					</button>
 					<button
 						class="-mb-px border-b-2 border-transparent px-4 py-2 text-sm font-medium transition-colors"
 						class:border-primary={activeTab === 'history'}
@@ -789,75 +925,88 @@
 						class:text-muted-foreground={activeTab !== 'history'}
 						on:click={() => (activeTab = 'history')}
 					>
-						Change History
+						Versions ({activeDoc.versions.length})
 					</button>
-				{/if}
-				<button
-					class="-mb-px border-b-2 border-transparent px-4 py-2 text-sm font-medium transition-colors"
-					class:border-primary={activeTab === 'timeline'}
-					class:text-primary={activeTab === 'timeline'}
-					class:text-muted-foreground={activeTab !== 'timeline'}
-					on:click={() => (activeTab = 'timeline')}
-				>
-					Approval Timeline
-				</button>
-			</div>
+					<button
+						class="-mb-px border-b-2 border-transparent px-4 py-2 text-sm font-medium transition-colors"
+						class:border-primary={activeTab === 'timeline'}
+						class:text-primary={activeTab === 'timeline'}
+						class:text-muted-foreground={activeTab !== 'timeline'}
+						on:click={() => (activeTab = 'timeline')}
+					>
+						Approval Timeline
+					</button>
+				</div>
 
-			<!-- Tab Content -->
-			<div class="mt-4">
-				{#if activeTab === 'edit'}
-					<div class="space-y-4">
-						<div>
-							<label class="mb-1.5 block text-sm font-medium" for="manage-doc-title">Title</label>
-							<input
-								id="manage-doc-title"
-								class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
-								bind:value={editTitle}
-								disabled={!canEdit(activeDoc)}
-                required
-							/>
-						</div>
+				<!-- Tab Content -->
+				<div class="mt-4">
+					{#if activeTab === 'edit'}
+						<div class="space-y-4">
+							<p class="text-muted-foreground text-xs">
+								{activeDoc.reference} · owned by {activeDoc.owner.name}
+							</p>
 
-						<div>
-							<label class="mb-1.5 block text-sm font-medium" for="manage-doc-department">Department</label>
-							<select
-								id="manage-doc-department"
-								class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
-								bind:value={editDepartment}
-								disabled={!canEdit(activeDoc)}
-                required
-							>
-								{#each $departmentNames as name (name)}
-									<option>{name}</option>
-								{/each}
-								{#if !$departmentNames.includes(activeDoc.department)}
-									<!-- Keep a department that has since been deleted selectable. -->
-									<option>{activeDoc.department}</option>
-								{/if}
-							</select>
-						</div>
+							<div>
+								<label class="mb-1.5 block text-sm font-medium" for="manage-doc-title">Title</label>
+								<input
+									id="manage-doc-title"
+									class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
+									bind:value={editTitle}
+									maxlength={200}
+									disabled={!canEditContent(activeDoc)}
+									required
+								/>
+							</div>
 
-						<div>
-							<label class="mb-1.5 block text-sm font-medium" for="manage-doc-status">Status</label>
-							<select
-								id="manage-doc-status"
-								class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
-								bind:value={editStatus}
-								disabled={!canEdit(activeDoc)}
-                required
-							>
-								<option>Draft</option>
-								<option>Pending</option>
-								<option>Approved</option>
-								<option>Rejected</option>
-							</select>
-						</div>
+							<div>
+								<label class="mb-1.5 block text-sm font-medium" for="manage-doc-description">Description</label>
+								<textarea
+									id="manage-doc-description"
+									rows="2"
+									class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
+									bind:value={editDescription}
+									disabled={!canEditContent(activeDoc)}
+								></textarea>
+							</div>
 
-						<div>
-							{#if canEdit(activeDoc)}
-								<div class="mb-4">
+							<div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+								<div>
+									<label class="mb-1.5 block text-sm font-medium" for="manage-doc-department">Department</label>
+									<select
+										id="manage-doc-department"
+										class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
+										bind:value={editDepartmentId}
+										disabled={!canEditContent(activeDoc) || !seesAllDepartments}
+									>
+										<option value="">No department</option>
+										{#each departments as dept (dept.id)}
+											<option value={String(dept.id)}>{dept.name}</option>
+										{/each}
+										{#if activeDoc.department && !departments.some((d) => d.id === activeDoc?.department?.id)}
+											<option value={String(activeDoc.department.id)}>{activeDoc.department.name}</option>
+										{/if}
+									</select>
+								</div>
+
+								<div>
+									<label class="mb-1.5 block text-sm font-medium" for="manage-doc-status">Status</label>
+									<select
+										id="manage-doc-status"
+										class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
+										bind:value={editStatus}
+										disabled={!canChangeStatus(activeDoc)}
+									>
+										{#each STATUSES as s (s)}
+											<option value={s} disabled={statusOptionDisabled(s, activeDoc.status)}>{statusLabel(s)}</option>
+										{/each}
+									</select>
+								</div>
+							</div>
+
+							{#if canEditContent(activeDoc)}
+								<div>
 									<p class="mb-1.5 text-sm font-medium">
-										{$settings.documents.enableVersioning ? 'Upload new file' : 'Replace file'}
+										{appSettings.documents.enableVersioning ? 'Upload new version' : 'Replace file'}
 									</p>
 
 									<div class="relative">
@@ -873,7 +1022,7 @@
 												id="doc-replace-file"
 												bind:this={replaceFileInput}
 												type="file"
-												accept={toAcceptAttribute($settings.documents.allowedFileTypes) || undefined}
+												accept={toAcceptAttribute(appSettings.documents.allowedFileTypes) || undefined}
 												on:change={handleFileUpdate}
 												class="sr-only"
 											/>
@@ -894,9 +1043,9 @@
 													{#if updatedFile}
 														{formatFileSize(updatedFile.size)} · click to choose a different file
 													{:else}
-														Click to browse{$settings.documents.enableVersioning
+														Click to browse{appSettings.documents.enableVersioning
 															? ' · saving creates a new version'
-															: ''}
+															: ' · saving replaces the current file'}
 													{/if}
 												</span>
 											</span>
@@ -913,183 +1062,175 @@
 											</button>
 										{/if}
 									</div>
+
+									{#if updatedFile}
+										<label class="mt-3 mb-1.5 block text-sm font-medium" for="doc-version-note">
+											What changed? <span class="text-muted-foreground font-normal">(optional)</span>
+										</label>
+										<input
+											id="doc-version-note"
+											type="text"
+											bind:value={versionNote}
+											maxlength={1000}
+											class="border-border/60 focus-visible:ring-ring/50 w-full rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none transition-shadow focus-visible:ring-2"
+										/>
+									{/if}
 								</div>
 							{/if}
 						</div>
-					</div>
-				{/if}
+					{/if}
 
-				{#if activeTab === 'history' && $settings.documents.enableVersioning}
-					{#if activeDoc.versions?.length}
+					{#if activeTab === 'history'}
 						{@const versions = activeDoc.versions}
-						<!-- Newest first; each card is compared with the version before it. -->
-						<ol class="space-y-4">
-							{#each versions.map((version, index) => ({ version, index })).reverse() as { version, index } (version.id)}
-								{@const prev = index > 0 ? versions[index - 1] : null}
-								{@const changes = prev ? versionChanges(prev, version) : []}
-								{@const isCurrent = index === versions.length - 1}
-								<li class="relative pl-10">
-									{#if index > 0}
-										<span class="bg-border absolute top-8 -bottom-4 left-[13px] w-px" aria-hidden="true"></span>
-									{/if}
-									<span
-										class={`bg-card absolute top-0.5 left-0 flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-semibold ${
-											isCurrent ? 'border-primary text-foreground' : 'border-border text-muted-foreground'
-										}`}
-									>
-										v{index + 1}
-									</span>
-
-									<div class="border-border/60 bg-card rounded-xl border p-4">
-										<div class="flex flex-wrap items-center justify-between gap-2">
-											<div class="flex items-center gap-2">
-												<span class="text-sm font-medium">
-													{prev ? `Edited by ${version.editor}` : 'Initial version'}
-												</span>
-												{#if isCurrent}
-													<StatusBadge tone="info">Current</StatusBadge>
-												{/if}
-											</div>
-											<div class="flex items-center gap-3">
-												<time class="text-muted-foreground text-xs" datetime={version.timestamp}>
-													{formatTime(version.timestamp)}
-												</time>
-												{#if version.file}
-													{@const doc = activeDoc}
-													<Button variant="outline" size="sm" onclick={() => openPreview(doc, version.id)}>
-														<Eye class="h-3.5 w-3.5" /> Preview
-													</Button>
-												{/if}
-											</div>
-										</div>
-
-										{#if !prev || changes.length || version.fileName}
-											<dl class="mt-3 grid grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-2 text-sm">
-												{#if !prev}
-													{#each TRACKED_FIELDS as field (field)}
-														<dt class="text-muted-foreground text-xs">{FIELD_LABELS[field]}</dt>
-														<dd>
-															{#if field === 'status'}
-																<StatusBadge status={String(version.snapshot.status)} />
-															{:else}
-																{version.snapshot[field]}
-															{/if}
-														</dd>
-													{/each}
-												{:else}
-													{#each changes as change (change.field)}
-														<dt class="text-muted-foreground text-xs">{FIELD_LABELS[change.field]}</dt>
-														<dd class="flex min-w-0 flex-wrap items-center gap-2">
-															{#if change.field === 'status'}
-																<StatusBadge status={change.before} class="opacity-60" />
-																<ArrowRight class="text-muted-foreground h-3.5 w-3.5 shrink-0" />
-																<StatusBadge status={change.after} />
-															{:else}
-																<span class="diff-before">{change.before}</span>
-																<ArrowRight class="text-muted-foreground h-3.5 w-3.5 shrink-0" />
-																<span class="diff-after">{change.after}</span>
-															{/if}
-														</dd>
-													{/each}
-												{/if}
-												{#if version.fileName}
-													<dt class="text-muted-foreground text-xs">File</dt>
-													<dd class="flex min-w-0 items-center gap-1.5">
-														<FileText class="text-muted-foreground h-3.5 w-3.5 shrink-0" />
-														<span class="truncate">{version.fileName}</span>
-													</dd>
-												{/if}
-											</dl>
-										{:else}
-											<p class="text-muted-foreground mt-2 text-sm">No field changes.</p>
+						{#if versions.length}
+							<!-- Newest first; each card's content is compared with the version before it. -->
+							<ol class="space-y-4">
+								{#each versions.map((version, index) => ({ version, index })).reverse() as { version, index } (version.id)}
+									{@const prev = index > 0 ? versions[index - 1] : null}
+									{@const isCurrent = index === versions.length - 1}
+									<li class="relative pl-10">
+										{#if index > 0}
+											<span class="bg-border absolute top-8 -bottom-4 left-[13px] w-px" aria-hidden="true"></span>
 										{/if}
+										<span
+											class={`bg-card absolute top-0.5 left-0 flex h-7 w-7 items-center justify-center rounded-full border text-[11px] font-semibold ${
+												isCurrent ? 'border-primary text-foreground' : 'border-border text-muted-foreground'
+											}`}
+										>
+											v{version.versionNumber}
+										</span>
 
-										{#if version.fileText}
-											<details class="group border-border/60 mt-3 rounded-lg border" open={!!prev?.fileText}>
-												<summary
-													class="hover:bg-muted/50 flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium select-none"
-												>
-													<FileText class="text-muted-foreground h-3.5 w-3.5" />
-													{prev?.fileText ? 'Content changes' : 'File content'}
-													<ChevronDown
-														class="text-muted-foreground ml-auto h-3.5 w-3.5 transition-transform group-open:rotate-180"
-													/>
-												</summary>
-												<div
-													class="doc-diff border-border/60 max-h-64 overflow-auto border-t px-3 py-2.5 text-xs leading-relaxed whitespace-pre-wrap"
-												>
-													{#if prev?.fileText}
-														{@html diffHtml(prev.fileText, version.fileText)}
-													{:else}
-														{version.fileText}
+										<div class="border-border/60 bg-card rounded-xl border p-4">
+											<div class="flex flex-wrap items-center justify-between gap-2">
+												<div class="flex items-center gap-2">
+													<span class="text-sm font-medium">
+														{prev ? 'New version' : 'Initial version'}
+														<span class="text-muted-foreground font-normal">
+															by {version.uploadedBy?.name ?? 'a removed user'}
+														</span>
+													</span>
+													{#if isCurrent}
+														<StatusBadge tone="info">Current</StatusBadge>
 													{/if}
 												</div>
-											</details>
-										{/if}
-									</div>
-								</li>
-							{/each}
-						</ol>
-					{:else}
-						<div class="text-muted-foreground flex flex-col items-center gap-2 py-10 text-sm">
-							<History class="h-8 w-8 opacity-40" />
-							No changes yet.
-						</div>
-					{/if}
-				{/if}
+												<div class="flex items-center gap-3">
+													<time class="text-muted-foreground text-xs" datetime={version.createdAt}>
+														{formatTime(version.createdAt)}
+													</time>
+													{#if activeDoc}
+														{@const doc = activeDoc}
+														<Button variant="outline" size="sm" onclick={() => openPreview(doc, version.versionNumber)}>
+															<Eye class="h-3.5 w-3.5" /> Preview
+														</Button>
+													{/if}
+												</div>
+											</div>
 
-				{#if activeTab === 'timeline'}
-					{#if activeDoc.activity?.length}
-						{@const entries = [...activeDoc.activity].reverse()}
-						<ol>
-							{#each entries as log, i (log.id)}
-								{@const style = ACTION_STYLES[log.action] ?? ACTION_STYLES.edited}
-								{@const Icon = style.icon}
-								<li class="relative flex gap-3 pb-5 last:pb-0">
-									{#if i < entries.length - 1}
-										<span class="bg-border absolute top-9 bottom-1 left-4 w-px" aria-hidden="true"></span>
-									{/if}
-									<span class={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${style.class}`}>
-										<Icon class="h-4 w-4" />
-									</span>
-									<div class="min-w-0 flex-1 pt-1">
-										<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-											<p class="text-sm">
-												<span class="font-medium capitalize">{log.action}</span>
-												<span class="text-muted-foreground">by {log.actor}</span>
-											</p>
-											<time class="text-muted-foreground text-xs" datetime={log.timestamp}>
-												{formatTime(log.timestamp)}
-											</time>
+											<dl class="mt-3 grid grid-cols-[6.5rem_1fr] items-center gap-x-3 gap-y-2 text-sm">
+												<dt class="text-muted-foreground text-xs">File</dt>
+												<dd class="flex min-w-0 items-center gap-1.5">
+													<FileText class="text-muted-foreground h-3.5 w-3.5 shrink-0" />
+													<span class="truncate">{version.originalName}</span>
+													<span class="text-muted-foreground shrink-0 text-xs">· {formatFileSize(version.size)}</span>
+												</dd>
+												{#if version.note}
+													<dt class="text-muted-foreground text-xs">Note</dt>
+													<dd>{version.note}</dd>
+												{/if}
+											</dl>
+
+											{#if version.extractedText}
+												<details class="group border-border/60 mt-3 rounded-lg border" open={!!prev?.extractedText}>
+													<summary
+														class="hover:bg-muted/50 flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-xs font-medium select-none"
+													>
+														<FileText class="text-muted-foreground h-3.5 w-3.5" />
+														{prev?.extractedText ? 'Content changes' : 'File content'}
+														<ChevronDown
+															class="text-muted-foreground ml-auto h-3.5 w-3.5 transition-transform group-open:rotate-180"
+														/>
+													</summary>
+													<div
+														class="doc-diff border-border/60 max-h-64 overflow-auto border-t px-3 py-2.5 text-xs leading-relaxed whitespace-pre-wrap"
+													>
+														{#if prev?.extractedText}
+															{@html diffHtml(prev.extractedText, version.extractedText)}
+														{:else}
+															{version.extractedText}
+														{/if}
+													</div>
+												</details>
+											{/if}
 										</div>
-										{#if log.details}
-											<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
-												{#each log.details.split('; ') as line}
-													<li>{line}</li>
-												{/each}
-											</ul>
-										{/if}
-									</div>
-								</li>
-							{/each}
-						</ol>
-					{:else}
-						<div class="text-muted-foreground flex flex-col items-center gap-2 py-10 text-sm">
-							<CircleCheck class="h-8 w-8 opacity-40" />
-							No activity yet.
-						</div>
+									</li>
+								{/each}
+							</ol>
+						{:else}
+							<div class="text-muted-foreground flex flex-col items-center gap-2 py-10 text-sm">
+								<History class="h-8 w-8 opacity-40" />
+								No versions yet.
+							</div>
+						{/if}
 					{/if}
+
+					{#if activeTab === 'timeline'}
+						{#if activity.length}
+							{@const entries = [...activity].reverse()}
+							<ol>
+								{#each entries as log, i (log.id)}
+									{@const style = ACTION_STYLES[log.action] ?? ACTION_STYLES.edited}
+									{@const Icon = style.icon}
+									<li class="relative flex gap-3 pb-5 last:pb-0">
+										{#if i < entries.length - 1}
+											<span class="bg-border absolute top-9 bottom-1 left-4 w-px" aria-hidden="true"></span>
+										{/if}
+										<span class={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${style.class}`}>
+											<Icon class="h-4 w-4" />
+										</span>
+										<div class="min-w-0 flex-1 pt-1">
+											<div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+												<p class="text-sm">
+													<span class="font-medium capitalize">{log.action}</span>
+													<span class="text-muted-foreground">by {log.actor}</span>
+												</p>
+												<time class="text-muted-foreground text-xs" datetime={log.createdAt}>
+													{formatTime(log.createdAt)}
+												</time>
+											</div>
+											{#if log.details}
+												<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
+													{#each log.details.split('; ') as line}
+														<li>{line}</li>
+													{/each}
+												</ul>
+											{/if}
+										</div>
+									</li>
+								{/each}
+							</ol>
+						{:else}
+							<div class="text-muted-foreground flex flex-col items-center gap-2 py-10 text-sm">
+								<CircleCheck class="h-8 w-8 opacity-40" />
+								No activity yet.
+							</div>
+						{/if}
+					{/if}
+				</div>
+
+				{#if manageError}
+					<p class="text-destructive mt-4 text-sm">{manageError}</p>
 				{/if}
-			</div>
+			{/if}
 
 			<!-- Actions -->
 			<div class="mt-6 flex justify-end gap-2">
-				<Button variant="outline" onclick={closeModal}>Cancel</Button>
+				<Button variant="outline" onclick={closeModal} disabled={saving}>Cancel</Button>
 				<Button
-					disabled={!canEdit(activeDoc) || activeTab !== 'edit'}
+					disabled={!activeDoc || !canChangeStatus(activeDoc) || activeTab !== 'edit' || saving}
 					onclick={saveDocumentChanges}
 				>
-					Save Changes
+					{#if saving}<LoaderCircle class="h-4 w-4 animate-spin" />{/if}
+					{saving ? 'Saving…' : 'Save Changes'}
 				</Button>
 			</div>
 		</div>
@@ -1116,12 +1257,12 @@
 				<div class="min-w-0 flex-1">
 					<div class="flex items-center gap-2">
 						<h2 id="preview-title" class="truncate text-base font-semibold">{previewDoc.title}</h2>
-						<StatusBadge status={previewDoc.status} />
+						<StatusBadge status={statusLabel(previewDoc.status)} />
 					</div>
 					<p class="text-muted-foreground truncate text-xs">
-						{previewDoc.id} · {previewDoc.department}
-						{#if previewVersion?.file}
-							· {previewVersion.fileName ?? previewVersion.file.name} · {formatFileSize(previewVersion.file.size)}
+						{previewDoc.reference} · {previewDoc.department?.name ?? 'No department'}
+						{#if previewVersion}
+							· {previewVersion.originalName} · {formatFileSize(previewVersion.size)}
 						{/if}
 					</p>
 				</div>
@@ -1130,13 +1271,13 @@
 					<label class="sr-only" for="preview-version">Version</label>
 					<select
 						id="preview-version"
-						value={previewVersion?.id}
-						on:change={(e) => (previewVersionId = e.currentTarget.value)}
+						value={previewVersionNumber}
+						on:change={(e) => showVersion(Number(e.currentTarget.value))}
 						class="border-border/60 focus-visible:ring-ring/50 rounded-lg border bg-transparent py-1.5 pr-8 pl-3 text-sm shadow-xs outline-none focus-visible:ring-2"
 					>
 						{#each [...previewVersions].reverse() as version (version.id)}
-							<option value={version.id}>
-								{versionLabel(version)} · {formatTime(version.timestamp)}{version === previewVersions.at(-1)
+							<option value={version.versionNumber}>
+								v{version.versionNumber} · {formatTime(version.createdAt)}{version === previewVersions.at(-1)
 									? ' (latest)'
 									: ''}
 							</option>
@@ -1144,7 +1285,7 @@
 					</select>
 				{/if}
 
-				{#if previewVersion?.file}
+				{#if previewVersion}
 					{@const version = previewVersion}
 					<Button variant="outline" size="sm" onclick={() => downloadVersion(version)}>
 						<Download class="h-4 w-4" /> Download
@@ -1161,29 +1302,23 @@
 			</header>
 
 			<div class="bg-muted/40 min-h-0 flex-1 overflow-auto p-4">
-				{#if previewVersion?.file}
-					<DocumentPreview file={previewVersion.file} class="h-full" />
+				{#if previewError}
+					<div class="text-muted-foreground flex h-full flex-col items-center justify-center gap-2 text-center text-sm">
+						<FileX class="h-10 w-10 opacity-40" />
+						<p class="text-foreground font-medium">Couldn't load the file</p>
+						<p class="max-w-sm text-xs">{previewError}</p>
+					</div>
+				{:else if previewLoading}
+					<div class="text-muted-foreground flex h-full flex-col items-center justify-center gap-2 text-sm">
+						<LoaderCircle class="h-8 w-8 animate-spin opacity-60" />
+						Loading file…
+					</div>
+				{:else if previewFile}
+					<DocumentPreview file={previewFile} class="h-full" />
 				{:else}
-					{@const doc = previewDoc}
 					<div class="text-muted-foreground flex h-full flex-col items-center justify-center gap-2 text-center text-sm">
 						<FileX class="h-10 w-10 opacity-40" />
 						<p class="text-foreground font-medium">No file attached</p>
-						<p class="max-w-sm text-xs">
-							This document has no uploaded file yet{canEdit(doc) ? '. Upload one from Manage.' : '.'}
-						</p>
-						{#if canEdit(doc)}
-							<Button
-								variant="outline"
-								size="sm"
-								class="mt-2"
-								onclick={() => {
-									closePreview();
-									manageDocument(doc);
-								}}
-							>
-								<Upload class="h-4 w-4" /> Upload a file
-							</Button>
-						{/if}
 					</div>
 				{/if}
 			</div>
@@ -1194,7 +1329,7 @@
 <ConfirmDialog
 	open={!!docPendingDelete}
 	title="Delete document?"
-	description={docPendingDelete ? `This will remove "${docPendingDelete.title}" from the active list. This can be undone by an admin.` : ''}
+	description={docPendingDelete ? `This will remove "${docPendingDelete.title}" from the active list. An admin can restore it from “Show deleted”.` : ''}
 	confirmText="Delete"
 	onConfirm={confirmDeleteDocument}
 	onCancel={() => (docPendingDelete = null)}
@@ -1226,16 +1361,6 @@
 
 	:global(.dark) .doc-diff :global(.diff-remove) {
 		color: rgb(252 165 165);
-	}
-
-	.diff-before {
-		color: var(--muted-foreground);
-		text-decoration: line-through;
-		text-decoration-color: rgb(239 68 68 / 0.6);
-	}
-
-	.diff-after {
-		font-weight: 500;
 	}
 
 	summary::-webkit-details-marker {

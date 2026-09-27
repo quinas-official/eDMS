@@ -1,4 +1,5 @@
 import type {
+	DocumentActivityDTO,
 	DocumentDetailDTO,
 	DocumentListQuery,
 	DocumentListResponse,
@@ -18,6 +19,11 @@ export function listDocuments(query: DocumentListQuery = {}) {
 
 export async function getDocument(id: string) {
 	return (await apiFetch<{ document: DocumentDetailDTO }>(`/api/documents/${id}`)).document;
+}
+
+export async function listDocumentActivity(id: string) {
+	return (await apiFetch<{ activity: DocumentActivityDTO[] }>(`/api/documents/${id}/activity`))
+		.activity;
 }
 
 export interface NewDocumentInput {
