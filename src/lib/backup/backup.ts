@@ -3,8 +3,6 @@ import { documents } from '$lib/documents/store';
 import type { DocumentMeta } from '$lib/documents/types';
 import { departments, replaceDepartments } from '$lib/departments/store';
 import type { Department } from '$lib/departments/types';
-import { activityLog, replaceActivityLog } from '$lib/activity/store';
-import type { ActivityLog } from '$lib/activity/types';
 import { settings, replaceSettings } from '$lib/settings/store';
 import type { AppSettings } from '$lib/settings/types';
 
@@ -18,14 +16,18 @@ export interface BackupPayload {
 		settings: AppSettings;
 		documents: DocumentMeta[];
 		departments: Department[];
-		activity: ActivityLog[];
+		/**
+		 * Older backups carried the browser-local audit log. The log now lives on
+		 * the server, which is append-only, so this is ignored on restore.
+		 */
+		activity?: unknown[];
 	};
 }
 
 /**
- * Only the stores that are actually persisted are included. The users and
- * workflow pages still hold page-local mock arrays that reset on reload, so
- * there is nothing durable to capture for them yet.
+ * Only the stores that are actually persisted in this browser are included.
+ * The audit log is on the server; the users and workflow pages still hold
+ * page-local mock arrays that reset on reload.
  */
 export function buildBackup(): BackupPayload {
 	return {
@@ -35,8 +37,7 @@ export function buildBackup(): BackupPayload {
 		data: {
 			settings: get(settings),
 			documents: get(documents),
-			departments: get(departments),
-			activity: get(activityLog)
+			departments: get(departments)
 		}
 	};
 }
@@ -77,11 +78,10 @@ export function parseBackup(text: string): BackupPayload {
 export function applyBackup(payload: BackupPayload) {
 	replaceSettings(payload.data.settings ?? null);
 	replaceDepartments(payload.data.departments ?? null);
-	replaceActivityLog(payload.data.activity ?? null);
 	documents.set(payload.data.documents ?? []);
 }
 
 export function describeBackup(payload: BackupPayload): string {
-	const { documents: docs, departments: deps, activity } = payload.data;
-	return `${deps?.length ?? 0} departments, ${docs?.length ?? 0} documents, ${activity?.length ?? 0} log entries, exported ${new Date(payload.exportedAt).toLocaleString()}`;
+	const { documents: docs, departments: deps } = payload.data;
+	return `${deps?.length ?? 0} departments, ${docs?.length ?? 0} documents, exported ${new Date(payload.exportedAt).toLocaleString()}`;
 }

@@ -9,7 +9,7 @@
 		removeDepartment
 	} from '$lib/departments/store';
 	import type { Department } from '$lib/departments/types';
-	import { logActivity } from '$lib/activity/store';
+	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
 
 	let search = '';
 	let viewMode: 'table' | 'cards' = 'table';
@@ -31,7 +31,6 @@
 	function createDepartment() {
 		if (!formName.trim()) return;
 		addDepartment(formName.trim(), formDescription);
-		logActivity('created', { target: formName.trim(), details: 'Department created' });
 		showCreate = false;
 	}
 
@@ -44,7 +43,6 @@
 	function saveEdit() {
 		if (!showEdit) return;
 		updateDepartment(showEdit.id, { name: formName, description: formDescription });
-		logActivity('edited', { target: formName, details: 'Department updated' });
 		showEdit = null;
 	}
 
@@ -56,10 +54,6 @@
 
 	function confirmRemoveDepartment() {
 		if (departmentPendingDelete) {
-			logActivity('deleted', {
-				target: departmentPendingDelete.name,
-				details: 'Department deleted'
-			});
 			removeDepartment(departmentPendingDelete.id);
 		}
 		departmentPendingDelete = null;
@@ -134,7 +128,7 @@
             <td class="px-4 py-3.5 font-medium">{dep.name}</td>
             <td class="text-muted-foreground px-4 py-3.5 text-center text-sm">{dep.description}</td>
             <td class="px-4 py-3.5 text-center">{dep.members.length}</td>
-            <td class="px-4 py-3.5 text-center">{dep.createdAt}</td>
+            <td class="px-4 py-3.5 text-center"><RelativeTime value={dep.createdAt} /></td>
             <td class="flex justify-end gap-1 px-4 py-3.5">
               <button class="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 transition-colors" on:click={() => openEdit(dep)}>
                 <Pencil class="h-4 w-4" />

@@ -2,6 +2,7 @@
   import  Input  from '$lib/components/ui/input/input.svelte';
   import  Button  from '$lib/components/ui/button/button.svelte';
   import { signIn } from '$lib/auth/store';
+  import { showWelcome } from '$lib/auth/welcome';
   import { ApiError } from '$lib/api/client';
   import { NON_ADMIN_HOME } from '$lib/auth/guards';
   import { isAdmin } from '$lib/permissions';
@@ -18,6 +19,7 @@
     loading = true;
     try {
       const user = await signIn(username, password);
+      showWelcome(user.name);
       goto(isAdmin(user) ? '/admin' : NON_ADMIN_HOME);
     } catch (e) {
       // ApiError carries the server's message (wrong password, locked out, …);

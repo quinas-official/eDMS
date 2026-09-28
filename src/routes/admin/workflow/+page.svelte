@@ -4,7 +4,6 @@
   import { StatusBadge } from '$lib/components/ui/status-badge';
   import { departmentNames } from '$lib/departments/store';
   import { settings } from '$lib/settings/store';
-  import { logActivity } from '$lib/activity/store';
   import { crossfade, fade } from 'svelte/transition';
   import { flip } from 'svelte/animate';
   import { cubicOut, quintOut } from 'svelte/easing';
@@ -111,11 +110,6 @@
     workflowItems = workflowItems.map(i =>
       i.uid === item.uid ? { ...i, status: stage } : i
     );
-    logActivity(stage === 'Approved' ? 'approved' : 'edited', {
-      target: item.title,
-      targetId: item.id,
-      details: `Moved from ${item.status} to ${stage}`
-    });
   }
 
   // Assign modal
@@ -181,11 +175,6 @@ function saveWorkflow() {
   };
 
   workflowItems = [newItem, ...workflowItems];
-  logActivity('created', {
-    target: newItem.title,
-    targetId: newItem.id,
-    details: `Workflow item created in ${newItem.status}`
-  });
 
   addModal = false;
 }

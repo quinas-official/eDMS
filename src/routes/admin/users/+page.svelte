@@ -6,7 +6,7 @@
 	import { departmentNames } from '$lib/departments/store';
 	import { settings } from '$lib/settings/store';
 	import { ROLES, type Role } from '$lib/settings/types';
-	import { logActivity } from '$lib/activity/store';
+	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
 
 	interface User {
 		id: number;
@@ -95,7 +95,6 @@
 				createdAt: new Date().toISOString().split('T')[0]
 			}
 		];
-		logActivity('created', { target: formName, details: `User created as ${formRole}` });
 		showCreate = false;
 	}
 
@@ -124,7 +123,6 @@
 					}
 				: u
 		);
-		logActivity('edited', { target: formName, details: 'User updated' });
 		showEdit = null;
 	}
 
@@ -140,7 +138,6 @@
 
 	function confirmRemoveUser() {
 		if (userPendingDelete) {
-			logActivity('deleted', { target: userPendingDelete.name, details: 'User deleted' });
 			removeUser(userPendingDelete.id);
 		}
 		userPendingDelete = null;
@@ -243,7 +240,7 @@
 							</span>
 						</td>
 						<td class="px-4 py-3.5 text-center"><StatusBadge status={user.status} /></td>
-						<td class="px-4 py-3.5 text-center">{user.createdAt}</td>
+						<td class="px-4 py-3.5 text-center"><RelativeTime value={user.createdAt} /></td>
 						<td class="flex justify-end gap-1 px-4 py-3.5">
 							<button class="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 transition-colors" on:click={() => openEdit(user)}>
 								<Pencil class="h-4 w-4" />

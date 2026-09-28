@@ -57,6 +57,9 @@
 	import { DEFAULT_SETTINGS, toAcceptAttribute, type AppSettings } from '$lib/settings/types';
 	import { currentUser } from '$lib/auth/store';
 	import { can, isAdmin } from '$lib/permissions';
+	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
+	import { formatRelative } from '$lib/format/date';
+	import { toast } from '$lib/toast/store';
 
 	const PAGE_SIZE = 25;
 	const STATUSES: DocumentStatus[] = ['draft', 'pending', 'reviewed', 'approved', 'rejected'];
@@ -71,14 +74,6 @@
 		return err instanceof ApiError || err instanceof Error ? err.message : 'Something went wrong';
 	}
 
-	function formatTime(iso: string) {
-		return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-	}
-
-	function formatDate(iso: string) {
-		return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
-	}
-
 	// ---- Server state ---------------------------------------------------------
 	// Settings come from the server, which enforces them; the Settings page's
 	// browser-local copy can differ until it moves onto the API too.
@@ -86,14 +81,11 @@
 	let appSettings: AppSettings = structuredClone(DEFAULT_SETTINGS);
 	let departments: DepartmentDTO[] = [];
 
-	/** A failed action (delete, restore, loading departments), shown above the list. */
-	let actionError = '';
-
 	onMount(async () => {
 		try {
 			[departments, appSettings] = await Promise.all([listDepartments(), getServerSettings()]);
 		} catch (err) {
-			actionError = errorMessage(err);
+			toast.error("Couldn't load departments and settings", { description: errorMessage(err) });
 		}
 	});
 
@@ -232,7 +224,7 @@
 		saving = true;
 		formError = '';
 		try {
-			await createDocument({
+			const created = await createDocument({
 				file: currentFile,
 				title: title.trim() || undefined,
 				description: description.trim() || undefined,
@@ -241,6 +233,7 @@
 			});
 			showModal = false;
 			currentFile = null;
+			toast.success('Document uploaded', { description: `${created.reference} · ${created.title}` });
 			await refresh();
 		} catch (err) {
 			formError = errorMessage(err);
@@ -257,22 +250,26 @@
 		const doc = docPendingDelete;
 		docPendingDelete = null;
 		if (!doc) return;
-		actionError = '';
 		try {
 			await apiDeleteDocument(doc.id);
+			toast.success('Document deleted', {
+				description: canDeleteDocs
+					? `"${doc.title}" can be restored from Show deleted.`
+					: `"${doc.title}" was removed from the list.`
+			});
 			await refresh();
 		} catch (err) {
-			actionError = errorMessage(err);
+			toast.error("Couldn't delete the document", { description: errorMessage(err) });
 		}
 	}
 
 	async function restoreDocument(doc: DocumentDTO) {
-		actionError = '';
 		try {
 			await apiRestoreDocument(doc.id);
+			toast.success('Document restored', { description: `"${doc.title}" is back in the list.` });
 			await refresh();
 		} catch (err) {
-			actionError = errorMessage(err);
+			toast.error("Couldn't restore the document", { description: errorMessage(err) });
 		}
 	}
 
@@ -376,8 +373,15 @@
 				uploaded = true;
 			}
 			if (hasUpdate) await updateDocument(doc.id, update);
+			const message =
+				uploaded && !hasUpdate
+					? appSettings.documents.enableVersioning
+						? 'New version uploaded'
+						: 'File replaced'
+					: 'Changes saved';
 			saving = false;
 			closeModal();
+			toast.success(message, { description: nextTitle });
 			await refresh();
 		} catch (err) {
 			manageError = errorMessage(err);
@@ -535,7 +539,7 @@
 			const { saveAs } = await import('file-saver');
 			saveAs(file, version.originalName);
 		} catch (err) {
-			previewError = errorMessage(err);
+			toast.error("Couldn't download the file", { description: errorMessage(err) });
 		}
 	}
 
@@ -575,15 +579,6 @@
 					<li>{error}</li>
 				{/each}
 			</ul>
-		</div>
-	{/if}
-
-	{#if actionError}
-		<div class="border-destructive/30 bg-destructive/5 text-destructive flex items-start justify-between gap-3 rounded-lg border p-3 text-sm">
-			<p>{actionError}</p>
-			<button class="hover:bg-destructive/10 rounded-md p-0.5" aria-label="Dismiss" on:click={() => (actionError = '')}>
-				<X class="h-4 w-4" />
-			</button>
 		</div>
 	{/if}
 
@@ -681,8 +676,8 @@
 									</td>
 									<td class="px-4 py-3.5">{doc.department?.name ?? '—'}</td>
 									<td class="px-4 py-3.5"><StatusBadge status={statusLabel(doc.status)} /></td>
-									<td class="text-muted-foreground px-4 py-3.5">
-										{formatDate(doc.deletedAt ?? doc.createdAt)}
+									<td class="text-muted-foreground px-4 py-3.5 whitespace-nowrap">
+										<RelativeTime value={doc.deletedAt ?? doc.createdAt} />
 									</td>
 									<td class="px-4 py-3.5">
 										<div class="inline-flex gap-2">
@@ -742,7 +737,10 @@
 								<span class="text-muted-foreground">{doc.department?.name ?? '—'}</span>
 								<StatusBadge status={statusLabel(doc.status)} />
 							</div>
-							<p class="text-muted-foreground mt-3 text-xs">{formatDate(doc.deletedAt ?? doc.createdAt)}</p>
+							<p class="text-muted-foreground mt-3 text-xs">
+								{doc.deletedAt ? 'Deleted' : 'Created'} ·
+								<RelativeTime value={doc.deletedAt ?? doc.createdAt} />
+							</p>
 							<div class="border-border/60 mt-4 flex gap-2 border-t pt-4">
 								<Button variant="outline" size="sm" class="flex-1" onclick={() => openPreview(doc)}>
 									<Eye class="h-3.5 w-3.5" /> View
@@ -1114,9 +1112,7 @@
 													{/if}
 												</div>
 												<div class="flex items-center gap-3">
-													<time class="text-muted-foreground text-xs" datetime={version.createdAt}>
-														{formatTime(version.createdAt)}
-													</time>
+													<RelativeTime value={version.createdAt} class="text-muted-foreground text-xs" />
 													{#if activeDoc}
 														{@const doc = activeDoc}
 														<Button variant="outline" size="sm" onclick={() => openPreview(doc, version.versionNumber)}>
@@ -1193,9 +1189,7 @@
 													<span class="font-medium capitalize">{log.action}</span>
 													<span class="text-muted-foreground">by {log.actor}</span>
 												</p>
-												<time class="text-muted-foreground text-xs" datetime={log.createdAt}>
-													{formatTime(log.createdAt)}
-												</time>
+												<RelativeTime value={log.createdAt} class="text-muted-foreground text-xs" />
 											</div>
 											{#if log.details}
 												<ul class="text-muted-foreground mt-1 space-y-0.5 text-xs">
@@ -1277,7 +1271,7 @@
 					>
 						{#each [...previewVersions].reverse() as version (version.id)}
 							<option value={version.versionNumber}>
-								v{version.versionNumber} · {formatTime(version.createdAt)}{version === previewVersions.at(-1)
+								v{version.versionNumber} · {formatRelative(version.createdAt)}{version === previewVersions.at(-1)
 									? ' (latest)'
 									: ''}
 							</option>

@@ -13,8 +13,11 @@
 		type Role
 	} from '$lib/settings/types';
 	import { departmentNames } from '$lib/departments/store';
-	import { activityLog, clearActivityLog } from '$lib/activity/store';
-	import { ACTIVITY_ACTIONS, type ActivityAction } from '$lib/activity/types';
+	import { onMount } from 'svelte';
+	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
+	import { toast } from '$lib/toast/store';
+	import { listActivity } from '$lib/api/activity';
+	import { ACTIVITY_ACTIONS, actionLabel, type ActivityEntryDTO } from '$lib/activity/types';
 	import {
 		applyBackup,
 		describeBackup,
@@ -22,7 +25,7 @@
 		parseBackup,
 		type BackupPayload
 	} from '$lib/backup/backup';
-	import { Sun, Moon, Monitor, Trash2, Download, Upload, RotateCcw } from '@lucide/svelte';
+	import { Sun, Moon, Monitor, Download, Upload, RotateCcw, RefreshCw } from '@lucide/svelte';
 	import { fade } from 'svelte/transition';
 
 	/**
@@ -32,18 +35,14 @@
 	let draft = structuredClone($settings);
 	$: dirty = JSON.stringify(draft) !== JSON.stringify($settings);
 
-	let saved = false;
-	let saveTimeout: ReturnType<typeof setTimeout>;
-
 	function saveSettings() {
 		settings.set(structuredClone(draft));
-		saved = true;
-		clearTimeout(saveTimeout);
-		saveTimeout = setTimeout(() => (saved = false), 2500);
+		toast.success('Settings saved');
 	}
 
 	function discardChanges() {
 		draft = structuredClone($settings);
+		toast.info('Changes discarded');
 	}
 
 	const sections = [
@@ -86,12 +85,50 @@
 
 	// ---- Audit log ------------------------------------------------------------
 
-	let actionFilter: ActivityAction | 'All' = 'All';
-	let visibleCount = 20;
+	// Read from the server, which records every action; it's append-only, so there's no clearing it.
 
-	$: filteredActivity = $activityLog.filter(
-		(entry) => actionFilter === 'All' || entry.action === actionFilter
-	);
+	const AUDIT_PAGE_SIZE = 25;
+
+	let actionFilter = '';
+	let auditSearch = '';
+	let auditEntries: ActivityEntryDTO[] = [];
+	let auditCursor: number | null = null;
+	let auditLoading = false;
+	let auditError = '';
+
+	// Filters can change mid-request; only the latest request may land.
+	let auditSeq = 0;
+
+	async function loadAudit(reset: boolean) {
+		const seq = ++auditSeq;
+		auditLoading = true;
+		auditError = '';
+		try {
+			const res = await listActivity({
+				action: actionFilter || undefined,
+				search: auditSearch.trim() || undefined,
+				before: reset ? undefined : (auditCursor ?? undefined),
+				limit: AUDIT_PAGE_SIZE
+			});
+			if (seq !== auditSeq) return;
+			auditEntries = reset ? res.entries : [...auditEntries, ...res.entries];
+			auditCursor = res.nextCursor;
+		} catch (error) {
+			if (seq === auditSeq) {
+				auditError = error instanceof Error ? error.message : 'Could not load the audit log.';
+			}
+		} finally {
+			if (seq === auditSeq) auditLoading = false;
+		}
+	}
+
+	let auditSearchTimer: ReturnType<typeof setTimeout>;
+	function handleAuditSearch() {
+		clearTimeout(auditSearchTimer);
+		auditSearchTimer = setTimeout(() => loadAudit(true), 250);
+	}
+
+	onMount(() => loadAudit(true));
 
 	// ---- Backup / restore -----------------------------------------------------
 
@@ -116,25 +153,20 @@
 		if (pendingBackup) {
 			applyBackup(pendingBackup);
 			draft = structuredClone($settings);
+			toast.success('Backup restored', { description: describeBackup(pendingBackup) });
 		}
 		pendingBackup = null;
 	}
 
 	// ---- Destructive confirmations -------------------------------------------
 
-	type PendingAction = 'clear-log' | 'reset-settings' | null;
+	type PendingAction = 'reset-settings' | null;
 	let pendingAction: PendingAction = null;
 
 	const confirmCopy: Record<
 		Exclude<PendingAction, null>,
 		{ title: string; description: string; confirmText: string }
 	> = {
-		'clear-log': {
-			title: 'Clear activity log?',
-			description:
-				'This permanently deletes the system-wide activity history. Per-document trails are not affected. This cannot be undone.',
-			confirmText: 'Clear log'
-		},
 		'reset-settings': {
 			title: 'Reset all settings?',
 			description:
@@ -144,10 +176,10 @@
 	};
 
 	function runPendingAction() {
-		if (pendingAction === 'clear-log') clearActivityLog();
 		if (pendingAction === 'reset-settings') {
 			settings.set(structuredClone(DEFAULT_SETTINGS));
 			draft = structuredClone(DEFAULT_SETTINGS);
+			toast.success('Settings reset to defaults');
 		}
 		pendingAction = null;
 	}
@@ -498,31 +530,58 @@
 				<div>
 					<h2 class="text-sm font-semibold tracking-tight">Audit Log</h2>
 					<p class="text-muted-foreground mt-1 text-sm">
-						System-wide record of what changed, newest first.
+						System-wide record of what changed, newest first. Kept on the server and can't be
+						edited or cleared.
 					</p>
 				</div>
-				<div class="flex items-center gap-2">
+				<div class="flex flex-wrap items-center gap-2">
+					<label class="sr-only" for="audit-search">Search audit log</label>
+					<input
+						id="audit-search"
+						type="text"
+						placeholder="Search actor, target, details…"
+						bind:value={auditSearch}
+						on:input={handleAuditSearch}
+						class="border-border/60 focus-visible:ring-ring/50 rounded-lg border bg-transparent px-3 py-2 text-sm shadow-xs outline-none focus-visible:ring-2"
+					/>
 					<label class="text-muted-foreground shrink-0 text-xs font-medium" for="audit-filter">
 						Action
 					</label>
 					<select
 						id="audit-filter"
 						bind:value={actionFilter}
+						on:change={() => loadAudit(true)}
 						class="border-border/60 rounded-lg border bg-transparent px-2 py-2 text-sm shadow-xs"
 					>
-						<option value="All">All</option>
-						{#each ACTIVITY_ACTIONS as action (action)}
-							<option value={action}>{action}</option>
+						<option value="">All</option>
+						{#each ACTIVITY_ACTIONS as action (action.value)}
+							<option value={action.value}>{action.label}</option>
 						{/each}
 					</select>
+					<Button variant="outline" size="sm" disabled={auditLoading} onclick={() => loadAudit(true)}>
+						<RefreshCw class={`h-4 w-4 ${auditLoading ? 'animate-spin' : ''}`} />
+						Refresh
+					</Button>
 				</div>
 			</div>
 
-			{#if filteredActivity.length === 0}
+			{#if auditError}
+				<p class="border-destructive/30 bg-destructive/5 text-destructive mt-4 rounded-lg border p-3 text-sm">
+					{auditError}
+				</p>
+			{/if}
+
+			{#if auditEntries.length === 0}
 				<p
 					class="border-border/60 text-muted-foreground mt-4 rounded-lg border border-dashed p-6 text-center text-sm"
 				>
-					Nothing recorded yet.
+					{#if auditLoading}
+						Loading…
+					{:else if actionFilter || auditSearch.trim()}
+						No entries match these filters.
+					{:else}
+						Nothing recorded yet.
+					{/if}
 				</p>
 			{:else}
 				<div class="border-border/60 mt-4 overflow-x-auto rounded-lg border">
@@ -547,17 +606,28 @@
 							</tr>
 						</thead>
 						<tbody>
-							{#each filteredActivity.slice(0, visibleCount) as entry (entry.id)}
+							{#each auditEntries as entry (entry.id)}
 								<tr class="border-border/60 border-b last:border-0">
 									<td class="text-muted-foreground px-4 py-3 whitespace-nowrap">
-										{new Date(entry.timestamp).toLocaleString()}
+										<RelativeTime value={entry.createdAt} />
 									</td>
 									<td class="px-4 py-3">
-										<span class="bg-muted rounded-full px-2 py-0.5 text-xs font-medium capitalize">
-											{entry.action}
+										<span
+											class={`rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap ${
+												entry.action === 'login_failed'
+													? 'bg-destructive/10 text-destructive'
+													: 'bg-muted'
+											}`}
+										>
+											{actionLabel(entry.action)}
 										</span>
 									</td>
-									<td class="px-4 py-3">{entry.target ?? '—'}</td>
+									<td class="px-4 py-3">
+										{entry.target ?? '—'}
+										{#if entry.targetType}
+											<span class="text-muted-foreground block text-xs capitalize">{entry.targetType}</span>
+										{/if}
+									</td>
 									<td class="text-muted-foreground px-4 py-3">{entry.actor}</td>
 									<td class="text-muted-foreground px-4 py-3">{entry.details ?? '—'}</td>
 								</tr>
@@ -568,11 +638,11 @@
 
 				<div class="mt-3 flex items-center justify-between gap-4">
 					<p class="text-muted-foreground text-xs">
-						Showing {Math.min(visibleCount, filteredActivity.length)} of {filteredActivity.length}
+						Showing {auditEntries.length}{auditCursor !== null ? '+' : ''} entries
 					</p>
-					{#if visibleCount < filteredActivity.length}
-						<Button variant="outline" size="sm" onclick={() => (visibleCount += 20)}>
-							Show more
+					{#if auditCursor !== null}
+						<Button variant="outline" size="sm" disabled={auditLoading} onclick={() => loadAudit(false)}>
+							{auditLoading ? 'Loading…' : 'Show more'}
 						</Button>
 					{/if}
 				</div>
@@ -586,8 +656,9 @@
 				All data lives in this browser. Export a copy before clearing site data or moving machines.
 			</p>
 			<p class="border-border/60 bg-muted/40 text-muted-foreground mt-3 rounded-lg border p-3 text-xs">
-				Includes settings, departments, documents and the audit log. Users and workflow items are
-				still page-local mock data and are not captured.
+				Includes the settings, departments and documents kept in this browser. The audit log lives
+				on the server and isn't part of this backup. Users and workflow items are still page-local
+				mock data and are not captured.
 			</p>
 
 			<div class="mt-4 flex flex-wrap gap-2">
@@ -623,21 +694,6 @@
 					class="border-destructive/30 bg-destructive/5 flex flex-wrap items-center justify-between gap-4 rounded-lg border p-4"
 				>
 					<div>
-						<p class="text-sm font-medium">Clear activity log</p>
-						<p class="text-muted-foreground text-sm">
-							Permanently deletes the system-wide activity history ({$activityLog.length} entries).
-						</p>
-					</div>
-					<Button variant="destructive" size="sm" onclick={() => (pendingAction = 'clear-log')}>
-						<Trash2 class="h-4 w-4" />
-						Clear log
-					</Button>
-				</div>
-
-				<div
-					class="border-destructive/30 bg-destructive/5 flex flex-wrap items-center justify-between gap-4 rounded-lg border p-4"
-				>
-					<div>
 						<p class="text-sm font-medium">Reset all settings</p>
 						<p class="text-muted-foreground text-sm">
 							Returns every section on this page to its factory default.
@@ -655,9 +711,7 @@
 
 <!-- Save bar -->
 <div class="border-border/60 mt-6 flex items-center justify-end gap-3 border-t pt-6">
-	{#if saved}
-		<p class="text-muted-foreground text-sm" transition:fade={{ duration: 150 }}>Settings saved</p>
-	{:else if dirty}
+	{#if dirty}
 		<p class="text-muted-foreground text-sm" transition:fade={{ duration: 150 }}>
 			You have unsaved changes
 		</p>
@@ -679,7 +733,7 @@
 	open={pendingBackup !== null}
 	title="Restore this backup?"
 	description={pendingBackup
-		? `${describeBackup(pendingBackup)}. Restoring overwrites your current settings, departments, documents and audit log.`
+		? `${describeBackup(pendingBackup)}. Restoring overwrites your current settings, departments and documents in this browser. The server's audit log is not affected.`
 		: ''}
 	confirmText="Restore"
 	onConfirm={confirmRestore}
