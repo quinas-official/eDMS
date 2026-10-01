@@ -2,10 +2,7 @@ import type { DocumentStatus } from '$lib/server/db/schema';
 
 export type { DocumentStatus };
 
-/**
- * Shapes returned by /api/documents. Dates are ISO strings; the UI's older
- * `DocumentMeta` in `./types` goes away once the documents page is on the API.
- */
+/** Shapes returned by /api/documents. Dates are ISO strings. */
 
 export interface DocumentVersionDTO {
 	id: string;

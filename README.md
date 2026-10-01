@@ -7,7 +7,7 @@ It ships two ways, both backed by **one central server**:
 - **Web app**: a SvelteKit Node server that hosts the UI and a JSON API under `/api/*`.
 - **Desktop app**: a Tauri 2 app that bundles its own copy of the UI and talks to the same server over `/api/*`. *(in progress)*
 
-> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. The Documents page, login, dashboard document data and the audit log use the API. **Departments, Users, Workflow and parts of Settings still read mock or `localStorage` data** and are being moved over one at a time.
+> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. The Documents, Departments and Settings pages, login, the dashboard and the audit log use the API. **Users and Workflow still use page-local mock data** and are being moved over one at a time.
 
 ---
 
@@ -76,15 +76,15 @@ src/
       +page.svelte         dashboard (charts, quick actions)
       documents/           documents list, upload, versions, preview   ← on the API
       workflow/            approval board (Draft → Pending → Reviewed → Approved)  ← still mock
-      departments/         department management                        ← still localStorage
+      departments/         department management                        ← on the API
       users/               user management                              ← still mock
-      settings/            org settings, role matrix, backup, audit log
+      settings/            org settings, role matrix, audit log         ← on the API
     api/
       health/              GET: liveness check
       auth/login|logout|me session management
       documents/...        see the API table below
-      departments/         list departments
-      settings/            GET: the settings the server enforces
+      departments/         GET: list (any user; ?details=true for admins), POST/PATCH/DELETE (admin)
+      settings/            GET: the settings the server enforces; PUT (admin): validate, save, audit-log
       activity/            GET: system-wide audit log (admin)
   lib/
     api/                   typed client wrappers per resource (client.ts, documents.ts, …)
@@ -94,14 +94,14 @@ src/
       documents/           document service + multipart upload handling
       storage/files.ts     reading and writing files on disk
       activity.ts          writing and listing the audit log
-      settings.ts          loading settings with defaults
+      settings.ts          loading, validating and saving settings
+      departments.ts       department CRUD; refuses to delete one still in use
     permissions/           can(), resolvePermissions(), isAdmin()
-    auth/ settings/ departments/ documents/   client stores + UI types
+    auth/ settings/ departments/ documents/   client stores (server-backed) + UI types
     components/ui/         shadcn-style primitives (button, card, input, dialog, …)
     components/site/       app components (DocumentPreview, UploadDropzone, Toaster, RelativeTime, …)
     toast/ format/ theme.ts  toasts, date formatting, light/dark theme
-    storage/               browser/filesystem storage adapters (older client-side persistence)
-    backup/                settings/data export and import
+    storage/filesystem.ts  Tauri file access (for the desktop app)
 scripts/seed.ts            creates the DB, default departments, admin (+ demo users with --demo)
 drizzle/                   SQL migrations (0001 adds the append-only audit triggers)
 src-tauri/                 Tauri 2 desktop shell (Rust)

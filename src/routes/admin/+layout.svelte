@@ -9,7 +9,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { currentUser, loadSession, sessionChecked, signOut } from '$lib/auth/store';
   import { NON_ADMIN_HOME, canAccessPath } from '$lib/auth/guards';
-  import { settings } from '$lib/settings/store';
+  import { loadSettings, settings } from '$lib/settings/store';
 
   let isCollapsed = false;
   let mobileOpen = false;
@@ -52,9 +52,11 @@
   // Re-arm whenever the configured timeout changes, not just on activity.
   $: $settings.security.sessionTimeoutMinutes, authorized, resetIdleTimer();
 
-  onMount(() => {
-    if (!$sessionChecked) loadSession();
+  onMount(async () => {
     resetIdleTimer();
+    const user = $sessionChecked ? $currentUser : await loadSession();
+    // The idle timeout and the pages below all follow the server's settings.
+    if (user) loadSettings().catch(() => {});
   });
   onDestroy(() => clearTimeout(idleTimer));
 

@@ -3,10 +3,15 @@
 	import { Button } from '$lib/components/ui/button';
 	import { StatusBadge } from '$lib/components/ui/status-badge';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
-	import { departmentNames } from '$lib/departments/store';
+	import { departmentNames, loadDepartments } from '$lib/departments/store';
 	import { settings } from '$lib/settings/store';
 	import { ROLES, type Role } from '$lib/settings/types';
 	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
+	import { onMount } from 'svelte';
+
+	onMount(() => {
+		loadDepartments().catch(() => {});
+	});
 
 	interface User {
 		id: number;

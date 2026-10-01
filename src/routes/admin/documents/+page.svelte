@@ -76,8 +76,7 @@
 	}
 
 	// ---- Server state ---------------------------------------------------------
-	// Settings come from the server, which enforces them; the Settings page's
-	// browser-local copy can differ until it moves onto the API too.
+	// Settings come from the server, which enforces them.
 
 	let appSettings: AppSettings = structuredClone(DEFAULT_SETTINGS);
 	let departments: DepartmentDTO[] = [];

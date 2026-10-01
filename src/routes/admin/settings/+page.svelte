@@ -3,47 +3,74 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
 	import { themePreference, setTheme, type ThemePreference } from '$lib/theme';
-	import { settings } from '$lib/settings/store';
+	import { loadSettings, saveSettings, settings, settingsLoaded } from '$lib/settings/store';
 	import {
 		DEFAULT_SETTINGS,
 		PERMISSION_LABELS,
 		ROLES,
 		parseAllowedTypes,
+		type AppSettings,
 		type Permission,
 		type Role
 	} from '$lib/settings/types';
-	import { departmentNames } from '$lib/departments/store';
+	import { departmentNames, loadDepartments } from '$lib/departments/store';
 	import { onMount } from 'svelte';
 	import RelativeTime from '$lib/components/site/RelativeTime.svelte';
 	import { toast } from '$lib/toast/store';
+	import { ApiError } from '$lib/api/client';
 	import { listActivity } from '$lib/api/activity';
 	import { ACTIVITY_ACTIONS, actionLabel, type ActivityEntryDTO } from '$lib/activity/types';
-	import {
-		applyBackup,
-		describeBackup,
-		downloadBackup,
-		parseBackup,
-		type BackupPayload
-	} from '$lib/backup/backup';
-	import { Sun, Moon, Monitor, Download, Upload, RotateCcw, RefreshCw } from '@lucide/svelte';
+	import { Sun, Moon, Monitor, RotateCcw, RefreshCw } from '@lucide/svelte';
 	import { fade } from 'svelte/transition';
 
+	function errorMessage(err: unknown) {
+		return err instanceof ApiError || err instanceof Error ? err.message : 'Something went wrong';
+	}
+
 	/**
-	 * Draft/commit. The page has an explicit Save button, so edits must not reach
-	 * the store — and therefore localStorage — on every keystroke.
+	 * Draft/commit. The page has an explicit Save button, so edits stay in the
+	 * draft until it's pressed; the store mirrors what the server has stored.
 	 */
 	let draft = structuredClone($settings);
-	$: dirty = JSON.stringify(draft) !== JSON.stringify($settings);
+	let loadError = '';
+	let saving = false;
+	$: dirty = $settingsLoaded && JSON.stringify(draft) !== JSON.stringify($settings);
 
-	function saveSettings() {
-		settings.set(structuredClone(draft));
-		toast.success('Settings saved');
+	async function reloadSettings() {
+		loadError = '';
+		try {
+			draft = structuredClone(await loadSettings());
+		} catch (err) {
+			loadError = errorMessage(err);
+		}
+	}
+
+	async function commit(next: AppSettings, successMessage: string) {
+		saving = true;
+		try {
+			draft = structuredClone(await saveSettings(next));
+			toast.success(successMessage);
+		} catch (err) {
+			// The draft is kept, so the admin can correct the field the server named.
+			toast.error("Settings weren't saved", { description: errorMessage(err) });
+		} finally {
+			saving = false;
+		}
+	}
+
+	function handleSave() {
+		commit(draft, 'Settings saved');
 	}
 
 	function discardChanges() {
 		draft = structuredClone($settings);
 		toast.info('Changes discarded');
 	}
+
+	onMount(() => {
+		reloadSettings();
+		loadDepartments().catch(() => {});
+	});
 
 	const sections = [
 		{ id: 'general', label: 'General' },
@@ -130,34 +157,6 @@
 
 	onMount(() => loadAudit(true));
 
-	// ---- Backup / restore -----------------------------------------------------
-
-	let importInput: HTMLInputElement;
-	let pendingBackup: BackupPayload | null = null;
-	let backupError = '';
-
-	async function handleBackupFile(event: Event) {
-		const file = (event.target as HTMLInputElement).files?.[0];
-		if (!file) return;
-		backupError = '';
-		try {
-			pendingBackup = parseBackup(await file.text());
-		} catch (error) {
-			backupError = error instanceof Error ? error.message : 'Could not read that file.';
-		}
-		// Allow re-picking the same file after a failure.
-		importInput.value = '';
-	}
-
-	function confirmRestore() {
-		if (pendingBackup) {
-			applyBackup(pendingBackup);
-			draft = structuredClone($settings);
-			toast.success('Backup restored', { description: describeBackup(pendingBackup) });
-		}
-		pendingBackup = null;
-	}
-
 	// ---- Destructive confirmations -------------------------------------------
 
 	type PendingAction = 'reset-settings' | null;
@@ -177,9 +176,12 @@
 
 	function runPendingAction() {
 		if (pendingAction === 'reset-settings') {
-			settings.set(structuredClone(DEFAULT_SETTINGS));
-			draft = structuredClone(DEFAULT_SETTINGS);
-			toast.success('Settings reset to defaults');
+			const defaults = structuredClone(DEFAULT_SETTINGS);
+			// The factory default department may not exist here; the server would refuse it.
+			if (!$departmentNames.includes(defaults.general.defaultDepartment)) {
+				defaults.general.defaultDepartment = $departmentNames[0] ?? '';
+			}
+			commit(defaults, 'Settings reset to defaults');
 		}
 		pendingAction = null;
 	}
@@ -220,6 +222,15 @@
 	</nav>
 
 	<div class="divide-border/60 min-w-0 divide-y">
+		{#if loadError}
+			<div class="border-destructive/30 bg-destructive/5 text-destructive mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-3 text-sm">
+				<span>Couldn't load settings from the server: {loadError}</span>
+				<Button variant="outline" size="sm" onclick={reloadSettings}>
+					<RefreshCw class="h-4 w-4" /> Retry
+				</Button>
+			</div>
+		{/if}
+
 		<!-- General -->
 		<section id="general" class="scroll-mt-4 pb-6">
 			<h2 class="text-sm font-semibold tracking-tight">General</h2>
@@ -244,6 +255,7 @@
 						Default department
 					</label>
 					<select id="default-department" bind:value={draft.general.defaultDepartment} class={inputClass}>
+						<option value="">None</option>
 						{#each $departmentNames as name (name)}
 							<option>{name}</option>
 						{/each}
@@ -653,35 +665,14 @@
 		<section id="backup" class="scroll-mt-4 py-6">
 			<h2 class="text-sm font-semibold tracking-tight">Backup &amp; Restore</h2>
 			<p class="text-muted-foreground mt-1 text-sm">
-				All data lives in this browser. Export a copy before clearing site data or moving machines.
+				Everything (settings, departments, users, documents, their files and the audit log) is
+				stored on the server, in the database file and the file storage folder.
 			</p>
 			<p class="border-border/60 bg-muted/40 text-muted-foreground mt-3 rounded-lg border p-3 text-xs">
-				Includes the settings, departments and documents kept in this browser. The audit log lives
-				on the server and isn't part of this backup. Users and workflow items are still page-local
-				mock data and are not captured.
+				Backups aren't available from this page yet. Until they are, the server administrator can
+				stop the server and copy its <code>data</code> folder (or the paths set in
+				<code>DATABASE_URL</code> and <code>STORAGE_DIR</code>).
 			</p>
-
-			<div class="mt-4 flex flex-wrap gap-2">
-				<Button variant="outline" size="sm" onclick={() => downloadBackup()}>
-					<Download class="h-4 w-4" /> Export backup
-				</Button>
-				<Button variant="outline" size="sm" onclick={() => importInput.click()}>
-					<Upload class="h-4 w-4" /> Restore from file
-				</Button>
-				<input
-					bind:this={importInput}
-					type="file"
-					accept="application/json,.json"
-					class="hidden"
-					on:change={handleBackupFile}
-				/>
-			</div>
-
-			{#if backupError}
-				<p class="border-destructive/30 bg-destructive/5 text-destructive mt-3 rounded-lg border p-3 text-sm">
-					{backupError}
-				</p>
-			{/if}
 		</section>
 
 		<!-- Danger Zone -->
@@ -699,7 +690,12 @@
 							Returns every section on this page to its factory default.
 						</p>
 					</div>
-					<Button variant="destructive" size="sm" onclick={() => (pendingAction = 'reset-settings')}>
+					<Button
+						variant="destructive"
+						size="sm"
+						disabled={!$settingsLoaded || saving}
+						onclick={() => (pendingAction = 'reset-settings')}
+					>
 						<RotateCcw class="h-4 w-4" />
 						Reset
 					</Button>
@@ -716,8 +712,10 @@
 			You have unsaved changes
 		</p>
 	{/if}
-	<Button variant="outline" disabled={!dirty} onclick={discardChanges}>Discard</Button>
-	<Button disabled={!dirty} onclick={saveSettings}>Save Changes</Button>
+	<Button variant="outline" disabled={!dirty || saving} onclick={discardChanges}>Discard</Button>
+	<Button disabled={!dirty || saving} onclick={handleSave}>
+		{saving ? 'Saving…' : 'Save Changes'}
+	</Button>
 </div>
 
 <ConfirmDialog
@@ -727,15 +725,4 @@
 	confirmText={pendingAction ? confirmCopy[pendingAction].confirmText : ''}
 	onConfirm={runPendingAction}
 	onCancel={() => (pendingAction = null)}
-/>
-
-<ConfirmDialog
-	open={pendingBackup !== null}
-	title="Restore this backup?"
-	description={pendingBackup
-		? `${describeBackup(pendingBackup)}. Restoring overwrites your current settings, departments and documents in this browser. The server's audit log is not affected.`
-		: ''}
-	confirmText="Restore"
-	onConfirm={confirmRestore}
-	onCancel={() => (pendingBackup = null)}
 />

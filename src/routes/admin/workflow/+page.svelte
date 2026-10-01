@@ -2,8 +2,13 @@
   import { FileText, Users, UserCheck, Pencil, Trash2, Table, Grid, Plus } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button';
   import { StatusBadge } from '$lib/components/ui/status-badge';
-  import { departmentNames } from '$lib/departments/store';
+  import { departmentNames, loadDepartments } from '$lib/departments/store';
   import { settings } from '$lib/settings/store';
+  import { onMount } from 'svelte';
+
+  onMount(() => {
+    loadDepartments().catch(() => {});
+  });
   import { crossfade, fade } from 'svelte/transition';
   import { flip } from 'svelte/animate';
   import { cubicOut, quintOut } from 'svelte/easing';
