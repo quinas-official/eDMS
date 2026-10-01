@@ -4,6 +4,9 @@ import type { AuthUser } from '$lib/auth/types';
 import type { Session } from '$lib/server/db/schema';
 
 declare global {
+	/** Set by vite.config.ts: true in the desktop app's static build. Use `isDesktop` from `$lib/config/env`. */
+	const __DESKTOP__: boolean;
+
 	namespace App {
 		// interface Error {}
 		interface Locals {

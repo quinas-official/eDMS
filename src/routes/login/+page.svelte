@@ -7,6 +7,8 @@
   import { NON_ADMIN_HOME } from '$lib/auth/guards';
   import { isAdmin } from '$lib/permissions';
   import { goto } from '$app/navigation';
+  import { isDesktop } from '$lib/config/env';
+  import { changeServer, connection } from '$lib/config/connection';
 
   let username = '';
   let password = '';
@@ -61,6 +63,13 @@
         {loading ? 'Signing in…' : 'Login'}
       </Button>
     </form>
+
+    {#if isDesktop && $connection.url}
+      <p class="text-sidebar-foreground/60 text-center text-xs">
+        Server: <span class="font-mono">{$connection.url}</span> ·
+        <button type="button" class="underline-offset-2 hover:underline" on:click={changeServer}>Change</button>
+      </p>
+    {/if}
 
     <!-- Footer -->
     <div class="text-sidebar-foreground/50 mt-4 space-y-1 text-center text-xs">

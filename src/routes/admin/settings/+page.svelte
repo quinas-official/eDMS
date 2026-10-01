@@ -20,8 +20,10 @@
 	import { ApiError } from '$lib/api/client';
 	import { listActivity } from '$lib/api/activity';
 	import { ACTIVITY_ACTIONS, actionLabel, type ActivityEntryDTO } from '$lib/activity/types';
+	import { isDesktop } from '$lib/config/env';
 	import {
 		backupDownloadUrl,
+		downloadBackupWithToken,
 		getLastRetentionRun,
 		runRetentionNow,
 		type RetentionRunDTO
@@ -81,6 +83,21 @@
 			.catch(() => {});
 	});
 
+	// ---- Backup (desktop) -----------------------------------------------------
+
+	let backupBusy = false;
+
+	async function downloadBackupDesktop() {
+		backupBusy = true;
+		try {
+			await downloadBackupWithToken();
+		} catch (err) {
+			toast.error("Couldn't download the backup", { description: errorMessage(err) });
+		} finally {
+			backupBusy = false;
+		}
+	}
+
 	// ---- Retention job --------------------------------------------------------
 
 	let lastRetention: RetentionRunDTO | null = null;
@@ -113,7 +130,6 @@
 		{ id: 'documents', label: 'Documents' },
 		{ id: 'retention', label: 'Retention' },
 		{ id: 'roles', label: 'Roles' },
-		{ id: 'notifications', label: 'Notifications' },
 		{ id: 'security', label: 'Security' },
 		{ id: 'audit', label: 'Audit log' },
 		{ id: 'backup', label: 'Backup' },
@@ -511,46 +527,6 @@
 			</p>
 		</section>
 
-		<!-- Notifications -->
-		<section id="notifications" class="scroll-mt-4 py-6">
-			<h2 class="text-sm font-semibold tracking-tight">Notifications</h2>
-			<p class="text-muted-foreground mt-1 text-sm">Choose what you get emailed about.</p>
-			<p class="border-border/60 bg-muted/40 text-muted-foreground mt-3 rounded-lg border p-3 text-xs">
-				These preferences are saved, but no mail is delivered yet — the app has no mail transport
-				configured.
-			</p>
-
-			<div class="mt-4 space-y-3">
-				<div class="border-border/60 flex items-center justify-between gap-4 rounded-lg border p-4">
-					<div>
-						<p class="text-sm font-medium">Document submitted for review</p>
-						<p class="text-muted-foreground text-sm">
-							Get notified when a document enters your queue.
-						</p>
-					</div>
-					<Switch bind:checked={draft.notifications.notifySubmitted} />
-				</div>
-				<div class="border-border/60 flex items-center justify-between gap-4 rounded-lg border p-4">
-					<div>
-						<p class="text-sm font-medium">Workflow assigned to you</p>
-						<p class="text-muted-foreground text-sm">
-							Get notified when someone assigns you a workflow item.
-						</p>
-					</div>
-					<Switch bind:checked={draft.notifications.notifyAssigned} />
-				</div>
-				<div class="border-border/60 flex items-center justify-between gap-4 rounded-lg border p-4">
-					<div>
-						<p class="text-sm font-medium">Weekly summary digest</p>
-						<p class="text-muted-foreground text-sm">
-							A weekly email recapping activity across all departments.
-						</p>
-					</div>
-					<Switch bind:checked={draft.notifications.weeklyDigest} />
-				</div>
-			</div>
-		</section>
-
 		<!-- Security -->
 		<section id="security" class="scroll-mt-4 py-6">
 			<h2 class="text-sm font-semibold tracking-tight">Security</h2>
@@ -577,17 +553,6 @@
 				</div>
 			</div>
 
-			<div class="mt-4">
-				<div class="border-border/60 flex items-center justify-between gap-4 rounded-lg border p-4 opacity-70">
-					<div>
-						<p class="text-sm font-medium">Require two-factor authentication for admins</p>
-						<p class="text-muted-foreground text-sm">
-							Unavailable — sign-in uses username and password only; a second factor isn't supported yet.
-						</p>
-					</div>
-					<Switch bind:checked={draft.security.require2fa} disabled />
-				</div>
-			</div>
 		</section>
 
 		<!-- Audit log -->
@@ -724,9 +689,16 @@
 			</p>
 
 			<div class="mt-4 flex flex-wrap gap-2">
-				<Button variant="outline" size="sm" href={backupDownloadUrl()} download>
-					<Download class="h-4 w-4" /> Download backup
-				</Button>
+				{#if isDesktop}
+					<Button variant="outline" size="sm" disabled={backupBusy} onclick={downloadBackupDesktop}>
+						<Download class="h-4 w-4" />
+						{backupBusy ? 'Preparing backup…' : 'Download backup'}
+					</Button>
+				{:else}
+					<Button variant="outline" size="sm" href={backupDownloadUrl()} download>
+						<Download class="h-4 w-4" /> Download backup
+					</Button>
+				{/if}
 			</div>
 			<p class="text-muted-foreground mt-2 text-xs">
 				A <code>.tar.gz</code> with a consistent snapshot of the database and every stored file,

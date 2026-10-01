@@ -33,6 +33,10 @@ export interface RetentionSettings {
 	purgeDeletedAfterDays: number;
 }
 
+/**
+ * Stored and validated, but hidden in the UI and unused: there's no mail
+ * transport yet. Kept so turning the feature on later needs no migration.
+ */
 export interface NotificationSettings {
 	notifySubmitted: boolean;
 	notifyAssigned: boolean;
@@ -41,6 +45,7 @@ export interface NotificationSettings {
 
 export interface SecuritySettings {
 	sessionTimeoutMinutes: number;
+	/** Always false: there's no second factor yet, and the server refuses to turn it on. */
 	require2fa: boolean;
 }
 

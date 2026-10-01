@@ -1,20 +1,23 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "dms",
+  "productName": "eDMS",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.edms.desktop",
   "build": {
-    "frontendDist": "../src",
-    "devUrl": "http://localhost:8080",
-    "beforeDevCommand": "bun run dev",
-    "beforeBuildCommand": "bun run build"
+    "frontendDist": "../build-desktop",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev:desktop",
+    "beforeBuildCommand": "npm run build:desktop"
   },
   "app": {
     "windows": [
       {
-        "title": "dms",
-        "width": 800,
-        "height": 600,
+        "title": "eDMS",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
         "resizable": true,
         "fullscreen": false
       }

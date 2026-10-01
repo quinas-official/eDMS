@@ -8,6 +8,9 @@
 		"build": "vite build",
 		"preview": "vite preview",
 		"start": "node --env-file-if-exists=.env build",
+		"dev:desktop": "node scripts/desktop.js dev",
+		"build:desktop": "node scripts/desktop.js build",
+		"tauri": "tauri",
 		"db:generate": "drizzle-kit generate",
 		"db:seed": "node --env-file-if-exists=.env scripts/seed.ts",
 		"db:restore": "node --env-file-if-exists=.env scripts/restore.ts",
@@ -30,6 +33,7 @@
 		"@lucide/svelte": "^1.48.0",
 		"@playwright/test": "^1.57.0",
 		"@sveltejs/adapter-node": "^5.5.7",
+		"@sveltejs/adapter-static": "^3",
 		"@sveltejs/kit": "^2.49.1",
 		"@sveltejs/vite-plugin-svelte": "^6.2.1",
 		"@tailwindcss/forms": "^0.5.10",
@@ -62,7 +66,6 @@
 		"vitest-browser-svelte": "^2.0.1"
 	},
 	"dependencies": {
-		"@tauri-apps/plugin-fs": "^2.4.4",
 		"better-sqlite3": "^13.0.3",
 		"chart.js": "^4.5.1",
 		"clsx": "^2.1.1",

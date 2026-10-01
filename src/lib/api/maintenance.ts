@@ -1,5 +1,5 @@
 import { getApiBaseUrl } from '$lib/config/env';
-import { apiFetch } from './client';
+import { apiFetch, apiFetchResponse } from './client';
 
 /** One run of the retention job, as /api/retention reports it. */
 export interface RetentionRunDTO {
@@ -26,4 +26,17 @@ export async function runRetentionNow() {
  */
 export function backupDownloadUrl() {
 	return `${getApiBaseUrl()}/api/backup`;
+}
+
+/**
+ * Desktop: a link can't carry the Bearer token, so the archive is fetched and
+ * saved from memory. Fine for typical libraries; very large ones are better
+ * downloaded from the web app.
+ */
+export async function downloadBackupWithToken() {
+	const res = await apiFetchResponse('/api/backup', { headers: { Accept: 'application/gzip' } });
+	const name =
+		/filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'edms-backup.tar.gz';
+	const { saveAs } = await import('file-saver');
+	saveAs(await res.blob(), name);
 }

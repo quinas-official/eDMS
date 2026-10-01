@@ -6,6 +6,9 @@ import { playwright } from '@vitest/browser-playwright';
 import { sveltekit } from '@sveltejs/kit/vite';
 
 export default defineConfig({
+	// True in the desktop app's build (scripts/desktop.js), false on the web.
+	define: { __DESKTOP__: JSON.stringify(process.env.BUILD_TARGET === 'desktop') },
+
 	plugins: [
 		tailwindcss(),
 		sveltekit(),

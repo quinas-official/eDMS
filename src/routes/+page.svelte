@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { dev } from '$app/environment';
+  import { resolve } from '$app/paths';
   import { goto } from '$app/navigation';
   import { listDocuments } from '$lib/api/documents';
   import type { DocumentDTO } from '$lib/documents/api-types';
@@ -22,6 +24,12 @@
   }
 
   $: if (dev && $currentUser) loadDocs();
+
+  // Outside dev there's nothing here: go straight in. The admin layout sends
+  // anyone not signed in to /login. (The desktop app also starts on this page.)
+  onMount(() => {
+    if (!dev) goto(resolve('/admin'), { replaceState: true });
+  });
 </script>
 
 {#if dev}
@@ -49,6 +57,6 @@
   </div>
 {:else}
   <div class="flex min-h-screen items-center justify-center">
-    <a class="border-border/60 rounded-lg border px-4 py-2 text-sm" href="/login">Sign in</a>
+    <a class="border-border/60 rounded-lg border px-4 py-2 text-sm" href="/admin">Open eDMS</a>
   </div>
 {/if}

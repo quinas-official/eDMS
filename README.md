@@ -5,7 +5,7 @@ A document management system for organizations on a local network (LAN). People 
 It ships two ways, both backed by **one central server**:
 
 - **Web app**: a SvelteKit Node server that hosts the UI and a JSON API under `/api/*`.
-- **Desktop app**: a Tauri 2 app that bundles its own copy of the UI and talks to the same server over `/api/*`. *(in progress)*
+- **Desktop app**: a Tauri 2 app that bundles its own copy of the UI and talks to the same server over `/api/*`.
 
 > **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. Every page (dashboard, documents, workflow, departments, users, settings) and login use the API; no page uses mock data.
 
@@ -43,7 +43,8 @@ Rules the code follows:
 3. **Two ways to authenticate, one sessions table.** The web app uses an httpOnly session cookie. The desktop app logs in with `client: "desktop"`, gets a token back, and sends `Authorization: Bearer <token>`. Session IDs are stored as SHA-256 hashes, never as the raw token.
 4. **The audit log is append-only.** SQL triggers reject `UPDATE`/`DELETE` on `activity_log`.
 5. **Migrations run automatically** when the server starts (`hooks.server.ts` → `runMigrations`).
-6. `getApiBaseUrl()` in `src/lib/config/env.ts` is empty on the web (same origin). The desktop app will set it to the server address the user chooses.
+6. `getApiBaseUrl()` in `src/lib/config/env.ts` is empty on the web (same origin). The desktop app sets it to the server address the user connects to. `isDesktop` (a build-time flag) switches the desktop code paths on.
+7. **CSRF and CORS are handled in `hooks.server.ts`.** A write that carries the session cookie must come from the server's own origin. Bearer requests can't be forged cross-site, so they're exempt. CORS is allowed only for the desktop app's origins, without credentials. SvelteKit's built-in origin check is off (`svelte.config.js`), because it would reject the desktop app's uploads and can't be configured at runtime.
 
 ### Roles and permissions
 
@@ -104,12 +105,13 @@ src/
     auth/ settings/ departments/ documents/   client stores (server-backed) + UI types
     components/ui/         shadcn-style primitives (button, card, input, dialog, …)
     components/site/       app components (DocumentPreview, UploadDropzone, Toaster, RelativeTime, …)
+    config/                API base URL, desktop flag, server connection (desktop)
     toast/ format/ theme.ts  toasts, date formatting, light/dark theme
-    storage/filesystem.ts  Tauri file access (for the desktop app)
 scripts/seed.ts            creates the DB, default departments, admin (+ demo users with --demo)
 scripts/restore.ts         restores a backup archive (server stopped)
 drizzle/                   SQL migrations (0001 adds the append-only audit triggers)
-src-tauri/                 Tauri 2 desktop shell (Rust)
+src-tauri/                 Tauri 2 desktop shell (Rust); bundles build-desktop/
+scripts/desktop.js         runs Vite with BUILD_TARGET=desktop (static build)
 e2e/                       Playwright tests
 ```
 
@@ -146,6 +148,7 @@ To also create `editor1` and `viewer1` for trying out roles, run `bun run db:see
 | `BODY_SIZE_LIMIT` | Production only. Keep it above the max upload size set in Settings; the Node default of 512K blocks most uploads |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Initial admin account, used by the seed |
 | `ORIGIN`, `PORT` | Production only. The server's public LAN URL (needed for CSRF checks) and port |
+| `DESKTOP_ORIGINS` | Extra origins allowed to call the API cross-origin, comma-separated. The Tauri defaults (`tauri://localhost`, `http(s)://tauri.localhost`) are always allowed |
 | `ADDRESS_HEADER`, `XFF_DEPTH` | Behind a reverse proxy, so sign-in throttling applies per client instead of per proxy |
 
 ### Production (LAN server)
@@ -156,6 +159,20 @@ bun run start           # node build; set ORIGIN and PORT in .env
 ```
 
 Check that the server is up at `/api/health`.
+
+### Desktop app
+
+The desktop app is the same UI built as static files (`build-desktop/`) and bundled into a Tauri 2 shell. On first launch it asks for the server address (e.g. `192.168.1.10:3000`), checks that it's an eDMS server, and remembers it. If the server stops answering, it shows a "can't reach the server" screen with Retry. You can change the server from the login page. It signs in with a Bearer token, kept in the app's own storage and cleared on sign-out.
+
+Building it needs the [Rust toolchain](https://tauri.app/start/prerequisites/) as well:
+
+```sh
+bun run tauri dev       # runs the desktop UI on :5173 in a Tauri window
+bun run tauri build     # installers under src-tauri/target/release/bundle/
+bun run build:desktop   # only the static UI, without Rust
+```
+
+The server needs nothing extra for the installed app. To try the static UI in a browser instead, serve `build-desktop/` with an SPA fallback and add its origin to `DESKTOP_ORIGINS`.
 
 ### Backup and restore
 
@@ -220,10 +237,10 @@ Done:
 4. Documents page moved onto the API; audit log API
 5. Dashboard, settings writes, departments, users and the workflow board on the API
 6. Server-side backup and restore; retention jobs (auto-archive, purge deleted)
+7. Desktop app: static build, server connection screen, Bearer sign-in, CORS and runtime CSRF check. Notifications and 2FA are hidden until they exist.
 
 Next:
 
-7. Tauri static build, a server-address setting, and CORS. SvelteKit's production CSRF check rejects cross-origin multipart POSTs, so the Tauri origin must be added to `kit.csrf.trustedOrigins`.
 8. Tests and CI
 
-Later ideas: expiring access requests and approvals, full-text search over extracted text, a version rollback UI, email notifications, and a Postgres option.
+Later ideas: expiring access requests and approvals, full-text search over extracted text, a version rollback UI, email notifications, two-factor sign-in, and a Postgres option.
