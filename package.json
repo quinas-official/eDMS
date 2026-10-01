@@ -10,6 +10,7 @@
 		"start": "node --env-file-if-exists=.env build",
 		"db:generate": "drizzle-kit generate",
 		"db:seed": "node --env-file-if-exists=.env scripts/seed.ts",
+		"db:restore": "node --env-file-if-exists=.env scripts/restore.ts",
 		"db:studio": "drizzle-kit studio",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

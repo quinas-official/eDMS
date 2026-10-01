@@ -2,6 +2,7 @@ import { json, redirect, type Handle, type ServerInit } from '@sveltejs/kit';
 import { sequence } from '@sveltejs/kit/hooks';
 import { paraglideMiddleware } from '$lib/paraglide/server';
 import { db, runMigrations } from '$lib/server/db';
+import { startRetentionSchedule } from '$lib/server/retention';
 import {
 	deleteSessionCookie,
 	readSessionToken,
@@ -13,6 +14,8 @@ import {
 // build onto an existing LAN server needs no separate migrate step.
 export const init: ServerInit = () => {
 	runMigrations(db);
+	// Auto-archive and the purge of expired deleted documents, hourly.
+	startRetentionSchedule();
 };
 
 /** Everything else under /api requires a signed-in user. */

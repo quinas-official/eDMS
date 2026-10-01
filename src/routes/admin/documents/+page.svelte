@@ -41,6 +41,7 @@
 		listDocumentActivity,
 		listDocuments,
 		restoreDocument as apiRestoreDocument,
+		setDocumentArchived,
 		updateDocument,
 		uploadVersion
 	} from '$lib/api/documents';
@@ -127,6 +128,7 @@
 	let selectedStatus: DocumentStatus | '' =
 		initialStatus && STATUSES.includes(initialStatus) ? initialStatus : '';
 	let showDeleted = params.get('deleted') === 'true' && can($currentUser, 'delete');
+	let showArchived = params.get('archived') === 'true';
 	let viewMode: 'table' | 'cards' = 'table';
 
 	// Any filter change goes back to the first page.
@@ -144,6 +146,7 @@
 		status: selectedStatus || undefined,
 		departmentId: selectedDepartment ? Number(selectedDepartment) : undefined,
 		deleted: showDeleted,
+		archived: showArchived && !showDeleted,
 		page,
 		pageSize: PAGE_SIZE
 	} satisfies DocumentListQuery;
@@ -268,6 +271,26 @@
 			await refresh();
 		} catch (err) {
 			toast.error("Couldn't delete the document", { description: errorMessage(err) });
+		}
+	}
+
+	/** Same people as status changes: editors and approvers, and approved documents stay frozen. */
+	$: canArchive = (doc: DocumentDTO) => canChangeStatus(doc);
+
+	async function toggleArchived(doc: DocumentDTO) {
+		const archive = !doc.archivedAt;
+		try {
+			await setDocumentArchived(doc.id, archive);
+			toast.success(archive ? 'Document archived' : 'Document unarchived', {
+				description: archive
+					? `"${doc.title}" moved to Show archived.`
+					: `"${doc.title}" is back in the active list.`
+			});
+			await refresh();
+		} catch (err) {
+			toast.error(archive ? "Couldn't archive the document" : "Couldn't unarchive the document", {
+				description: errorMessage(err)
+			});
 		}
 	}
 
@@ -448,6 +471,7 @@
 		deleted: { icon: Trash2, class: 'bg-red-500/15 text-red-600 dark:text-red-300' },
 		restored: { icon: RotateCcw, class: 'bg-blue-500/15 text-blue-600 dark:text-blue-300' },
 		archived: { icon: Archive, class: 'bg-amber-500/15 text-amber-600 dark:text-amber-300' },
+		unarchived: { icon: RotateCcw, class: 'bg-blue-500/15 text-blue-600 dark:text-blue-300' },
 		purged: { icon: Trash2, class: 'bg-red-500/15 text-red-600 dark:text-red-300' }
 	};
 
@@ -618,9 +642,23 @@
 					{/each}
 				</select>
 			</div>
+			<label class="text-muted-foreground flex items-center gap-2 text-xs font-medium">
+				<input
+					type="checkbox"
+					bind:checked={showArchived}
+					on:change={() => ((page = 1), showArchived && (showDeleted = false))}
+					class="border-border rounded"
+				/>
+				Show archived
+			</label>
 			{#if canDeleteDocs}
 				<label class="text-muted-foreground flex items-center gap-2 text-xs font-medium">
-					<input type="checkbox" bind:checked={showDeleted} on:change={() => (page = 1)} class="border-border rounded" />
+					<input
+						type="checkbox"
+						bind:checked={showDeleted}
+						on:change={() => ((page = 1), showDeleted && (showArchived = false))}
+						class="border-border rounded"
+					/>
 					Show deleted
 				</label>
 			{/if}
@@ -670,7 +708,7 @@
 								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Department</th>
 								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Status</th>
 								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">
-									{showDeleted ? 'Deleted' : 'Created'}
+									{showDeleted ? 'Deleted' : showArchived ? 'Archived' : 'Created'}
 								</th>
 								<th class="text-muted-foreground px-4 py-3 text-xs font-medium tracking-wide uppercase">Actions</th>
 							</tr>
@@ -685,7 +723,7 @@
 									<td class="px-4 py-3.5">{doc.department?.name ?? '—'}</td>
 									<td class="px-4 py-3.5"><StatusBadge status={statusLabel(doc.status)} /></td>
 									<td class="text-muted-foreground px-4 py-3.5 whitespace-nowrap">
-										<RelativeTime value={doc.deletedAt ?? doc.createdAt} />
+										<RelativeTime value={doc.deletedAt ?? doc.archivedAt ?? doc.createdAt} />
 									</td>
 									<td class="px-4 py-3.5">
 										<div class="inline-flex gap-2">
@@ -714,6 +752,17 @@
 													<Settings class="mr-1 h-3.5 w-3.5" />
 													Manage
 												</button>
+
+												{#if canArchive(doc)}
+													<!-- Archive / Unarchive -->
+													<button
+														class="hover:bg-muted hover:border-foreground/20 border-border/60 flex items-center rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all hover:-translate-y-px hover:shadow-sm"
+														on:click={() => toggleArchived(doc)}
+													>
+														<Archive class="mr-1 h-3.5 w-3.5" />
+														{doc.archivedAt ? 'Unarchive' : 'Archive'}
+													</button>
+												{/if}
 
 												<!-- Delete -->
 												<button
@@ -746,8 +795,8 @@
 								<StatusBadge status={statusLabel(doc.status)} />
 							</div>
 							<p class="text-muted-foreground mt-3 text-xs">
-								{doc.deletedAt ? 'Deleted' : 'Created'} ·
-								<RelativeTime value={doc.deletedAt ?? doc.createdAt} />
+								{doc.deletedAt ? 'Deleted' : doc.archivedAt ? 'Archived' : 'Created'} ·
+								<RelativeTime value={doc.deletedAt ?? doc.archivedAt ?? doc.createdAt} />
 							</p>
 							<div class="border-border/60 mt-4 flex gap-2 border-t pt-4">
 								<Button variant="outline" size="sm" class="flex-1" onclick={() => openPreview(doc)}>
@@ -761,6 +810,11 @@
 									<Button variant="outline" size="sm" class="flex-1" onclick={() => manageDocument(doc)}>
 										<Settings class="h-3.5 w-3.5" /> Manage
 									</Button>
+									{#if canArchive(doc)}
+										<Button variant="outline" size="sm" class="flex-1" onclick={() => toggleArchived(doc)}>
+											<Archive class="h-3.5 w-3.5" /> {doc.archivedAt ? 'Unarchive' : 'Archive'}
+										</Button>
+									{/if}
 								{/if}
 							</div>
 						</div>
@@ -794,7 +848,11 @@
 			{:else}
 				<FileText class="h-12 w-12 opacity-40" />
 				<h1 class="text-sm font-medium">
-					{showDeleted ? 'No deleted documents.' : 'No documents found matching your filters.'}
+					{showDeleted
+						? 'No deleted documents.'
+						: showArchived
+							? 'No archived documents.'
+							: 'No documents found matching your filters.'}
 				</h1>
 			{/if}
 		</div>

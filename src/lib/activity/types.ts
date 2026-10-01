@@ -7,11 +7,13 @@ export type ActivityAction =
 	| 'deleted'
 	| 'restored'
 	| 'archived'
+	| 'unarchived'
 	| 'purged'
 	| 'downloaded'
 	| 'login'
 	| 'logout'
-	| 'login_failed';
+	| 'login_failed'
+	| 'backup';
 
 export const ACTIVITY_ACTIONS: { value: ActivityAction; label: string }[] = [
 	{ value: 'created', label: 'Created' },
@@ -21,11 +23,13 @@ export const ACTIVITY_ACTIONS: { value: ActivityAction; label: string }[] = [
 	{ value: 'deleted', label: 'Deleted' },
 	{ value: 'restored', label: 'Restored' },
 	{ value: 'archived', label: 'Archived' },
+	{ value: 'unarchived', label: 'Unarchived' },
 	{ value: 'purged', label: 'Purged' },
 	{ value: 'downloaded', label: 'Downloaded' },
 	{ value: 'login', label: 'Signed in' },
 	{ value: 'logout', label: 'Signed out' },
-	{ value: 'login_failed', label: 'Failed sign-in' }
+	{ value: 'login_failed', label: 'Failed sign-in' },
+	{ value: 'backup', label: 'Backup downloaded' }
 ];
 
 export function actionLabel(action: string) {

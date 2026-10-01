@@ -14,7 +14,7 @@ import { getAppSettings } from '$lib/server/settings';
 import type { RequestHandler } from './$types';
 
 /**
- * Query: `search`, `status`, `departmentId`, `deleted=true`, `page`,
+ * Query: `search`, `status`, `departmentId`, `deleted=true`, `archived=true`, `page`,
  * `pageSize`. Newest-updated first.
  */
 export const GET: RequestHandler = (event) => {
@@ -26,6 +26,7 @@ export const GET: RequestHandler = (event) => {
 		status: params.has('status') ? parseStatus(params.get('status')) : undefined,
 		departmentId: optionalInt(params, 'departmentId'),
 		deleted: params.get('deleted') === 'true',
+		archived: params.get('archived') === 'true',
 		page: optionalInt(params, 'page'),
 		pageSize: optionalInt(params, 'pageSize')
 	};

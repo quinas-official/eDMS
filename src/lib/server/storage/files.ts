@@ -16,6 +16,11 @@ const STORAGE_DIR = resolve(env.STORAGE_DIR || 'data/files');
 
 const KEY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** Absolute path of a stored file; for the backup, which reads them straight from disk. */
+export function storagePath(key: string) {
+	return pathFor(key);
+}
+
 function pathFor(key: string) {
 	// Keys only ever come from `saveFile`, but a bad row must not become a path traversal.
 	if (!KEY_PATTERN.test(key)) throw new Error(`Invalid storage key: ${key}`);

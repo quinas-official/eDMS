@@ -63,6 +63,8 @@ export interface DocumentListQuery {
 	departmentId?: number;
 	/** Admins and users with `delete` only: list soft-deleted documents instead. */
 	deleted?: boolean;
+	/** List archived documents instead of active ones. Ignored with `deleted`. */
+	archived?: boolean;
 	page?: number;
 	pageSize?: number;
 }

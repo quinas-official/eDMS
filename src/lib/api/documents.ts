@@ -75,6 +75,15 @@ export function deleteDocument(id: string) {
 	return apiFetch<void>(`/api/documents/${id}`, { method: 'DELETE' });
 }
 
+/** Moves a document out of (or back into) the active list. Needs `upload` or `approve`. */
+export async function setDocumentArchived(id: string, archived: boolean) {
+	const res = await apiFetch<{ document: DocumentDetailDTO }>(`/api/documents/${id}/archive`, {
+		method: 'POST',
+		body: JSON.stringify({ archived })
+	});
+	return res.document;
+}
+
 export async function restoreDocument(id: string) {
 	const res = await apiFetch<{ document: DocumentDetailDTO }>(`/api/documents/${id}/restore`, {
 		method: 'POST'

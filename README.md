@@ -96,6 +96,8 @@ src/
       storage/files.ts     reading and writing files on disk
       activity.ts          writing and listing the audit log
       settings.ts          loading, validating and saving settings
+      retention.ts         hourly auto-archive and purge of expired deleted documents
+      backup.ts            streams a .tar.gz of a database snapshot and the stored files
       departments.ts       department CRUD; refuses to delete one still in use
       users.ts             user CRUD; last-admin and self-lockout guards, sign-out on password reset
     permissions/           can(), resolvePermissions(), isAdmin()
@@ -105,6 +107,7 @@ src/
     toast/ format/ theme.ts  toasts, date formatting, light/dark theme
     storage/filesystem.ts  Tauri file access (for the desktop app)
 scripts/seed.ts            creates the DB, default departments, admin (+ demo users with --demo)
+scripts/restore.ts         restores a backup archive (server stopped)
 drizzle/                   SQL migrations (0001 adds the append-only audit triggers)
 src-tauri/                 Tauri 2 desktop shell (Rust)
 e2e/                       Playwright tests
@@ -154,6 +157,23 @@ bun run start           # node build; set ORIGIN and PORT in .env
 
 Check that the server is up at `/api/health`.
 
+### Backup and restore
+
+Admins download a backup from **Settings → Backup**: a `.tar.gz` with `manifest.json`, a consistent snapshot of the database (`database.db`, taken with SQLite's online backup while the server keeps running) and every stored file under `files/`. Each download is recorded in the audit log.
+
+To restore, stop the server, then on the server machine:
+
+```sh
+bun run db:restore -- path/to/edms-backup-….tar.gz         # checks the archive and describes it
+bun run db:restore -- path/to/edms-backup-….tar.gz --yes   # restores
+```
+
+It refuses while a server answers on `PORT`, and refuses backups from a newer version of the app. The current database and files are renamed to `*.before-restore-<timestamp>`, not deleted. Migrations run on the next start.
+
+### Retention
+
+An hourly job (also **Settings → Retention → Run now**) applies the retention settings. With auto-archive on, documents in Draft, Approved or Rejected that haven't changed for the configured number of days are archived: they leave the active list and appear under **Show archived**, where they can be unarchived. Documents in Pending or Reviewed are never auto-archived. Documents deleted longer ago than the purge setting are removed for good, files included. Each document affected gets an audit entry by "System".
+
 ---
 
 ## API
@@ -165,18 +185,28 @@ Every endpoint except `health`, `auth/login` and `auth/logout` requires a signed
 | `POST` | `/api/auth/login` | JSON credentials. Sets a cookie, or returns a token when `client: "desktop"` |
 | `POST` | `/api/auth/logout` | Ends the session |
 | `GET` | `/api/auth/me` | Current user and their resolved permissions |
-| `GET` | `/api/documents` | List. Query: `search`, `status`, `departmentId`, `deleted=true`, `page`, `pageSize` |
+| `GET` | `/api/documents` | List of active documents. Query: `search`, `status`, `departmentId`, `archived=true` (archived instead), `deleted=true` (the trash), `page`, `pageSize` |
 | `POST` | `/api/documents` | Multipart: `file`, optional `title`, `description`, `status`, `departmentId`, `note` |
 | `GET` | `/api/documents/:id` | A document with all its versions |
 | `PATCH` | `/api/documents/:id` | JSON: `title`, `description`, `status`, `departmentId`, `assigneeId` |
 | `DELETE` | `/api/documents/:id` | Soft delete |
 | `POST` | `/api/documents/:id/restore` | Undo a soft delete |
+| `POST` | `/api/documents/:id/archive` | JSON `{ archived: boolean }`. Needs `upload` or `approve` |
 | `POST` | `/api/documents/:id/versions` | Multipart: `file`, optional `note` |
 | `GET` | `/api/documents/:id/download` | Query: `version` (default latest), `inline=true` for previews |
 | `GET` | `/api/documents/:id/activity` | That document's history |
-| `GET` | `/api/departments` | Departments |
+| `GET` | `/api/departments` | Departments. `?details=true` (admin) adds members and document counts |
+| `POST` | `/api/departments` | Admin only. JSON `name`, `description` |
+| `PATCH` / `DELETE` | `/api/departments/:id` | Admin only. Delete is refused while users or documents are filed there |
+| `GET` / `POST` | `/api/users` | Admin only. List, or create (`username`, `name`, `email`, `role`, `status`, `departmentId`, `password`) |
+| `PATCH` / `DELETE` | `/api/users/:id` | Admin only. `password` resets it; document owners can only be deactivated |
+| `GET` | `/api/users/assignable` | Active users for assignee pickers. Editors and approvers |
 | `GET` | `/api/settings` | Settings the server enforces (upload limits, approval rules, role matrix) |
+| `PUT` | `/api/settings` | Admin only. JSON `{ settings }`, the whole object; validated and audit-logged |
 | `GET` | `/api/activity` | Admin only. Audit log. Query: `action`, `search`, `before` (cursor), `limit` |
+| `GET` | `/api/dashboard` | Admin only. Dashboard figures. Query: `tzOffset` |
+| `GET` | `/api/backup` | Admin only. Streams a `.tar.gz` backup (see below) |
+| `GET` / `POST` | `/api/retention` | Admin only. Last retention run, or run it now |
 
 ---
 
@@ -189,11 +219,11 @@ Done:
 3. Documents API with disk storage, versioning and department scoping
 4. Documents page moved onto the API; audit log API
 5. Dashboard, settings writes, departments, users and the workflow board on the API
+6. Server-side backup and restore; retention jobs (auto-archive, purge deleted)
 
 Next:
 
-6. Server-side backup, and retention jobs (auto-archive, purge deleted)
 7. Tauri static build, a server-address setting, and CORS. SvelteKit's production CSRF check rejects cross-origin multipart POSTs, so the Tauri origin must be added to `kit.csrf.trustedOrigins`.
 8. Tests and CI
 
-Later ideas: expiring access requests and approvals, full-text search over extracted text, archiving, a version rollback UI, email notifications, and a Postgres option.
+Later ideas: expiring access requests and approvals, full-text search over extracted text, a version rollback UI, email notifications, and a Postgres option.

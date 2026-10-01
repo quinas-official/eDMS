@@ -182,9 +182,12 @@ export function listDocuments(user: AuthUser, query: DocumentListQuery): Documen
 
 	if (query.deleted) {
 		if (!can(user, 'delete')) error(403, 'You do not have permission to see deleted documents');
+		// Archived or not: the trash shows everything that's in it.
 		conditions.push(isNotNull(documents.deletedAt));
 	} else {
 		conditions.push(isNull(documents.deletedAt));
+		// Archived documents leave the active list; `archived=true` lists only them.
+		conditions.push(query.archived ? isNotNull(documents.archivedAt) : isNull(documents.archivedAt));
 	}
 	if (query.status) conditions.push(eq(documents.status, query.status));
 	if (query.departmentId !== undefined) {
@@ -691,6 +694,33 @@ export function deleteDocument(user: AuthUser, id: string) {
 		targetId: id,
 		target: doc.title
 	});
+}
+
+/**
+ * Moves a document out of (or back into) the active list. The same people who
+ * can move it along the workflow can do this, and approved documents stay
+ * frozen for non-approvers.
+ */
+export function setArchived(user: AuthUser, id: string, archived: boolean): DocumentDetailDTO {
+	if (!can(user, 'upload') && !can(user, 'approve')) {
+		error(403, 'You do not have permission to archive documents');
+	}
+	const { doc } = loadDocument(user, id);
+	assertNotLocked(user, doc);
+	if (!!doc.archivedAt !== archived) {
+		db.update(documents)
+			.set({ archivedAt: archived ? new Date() : null })
+			.where(eq(documents.id, id))
+			.run();
+		logActivity({
+			action: archived ? 'archived' : 'unarchived',
+			actor: user,
+			targetType: 'document',
+			targetId: id,
+			target: doc.title
+		});
+	}
+	return getDocumentDetail(user, id);
 }
 
 export function restoreDocument(user: AuthUser, id: string): DocumentDetailDTO {

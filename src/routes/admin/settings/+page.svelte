@@ -20,7 +20,13 @@
 	import { ApiError } from '$lib/api/client';
 	import { listActivity } from '$lib/api/activity';
 	import { ACTIVITY_ACTIONS, actionLabel, type ActivityEntryDTO } from '$lib/activity/types';
-	import { Sun, Moon, Monitor, RotateCcw, RefreshCw } from '@lucide/svelte';
+	import {
+		backupDownloadUrl,
+		getLastRetentionRun,
+		runRetentionNow,
+		type RetentionRunDTO
+	} from '$lib/api/maintenance';
+	import { Sun, Moon, Monitor, RotateCcw, RefreshCw, Download, Play } from '@lucide/svelte';
 	import { fade } from 'svelte/transition';
 
 	function errorMessage(err: unknown) {
@@ -70,7 +76,36 @@
 	onMount(() => {
 		reloadSettings();
 		loadDepartments().catch(() => {});
+		getLastRetentionRun()
+			.then((run) => (lastRetention = run))
+			.catch(() => {});
 	});
+
+	// ---- Retention job --------------------------------------------------------
+
+	let lastRetention: RetentionRunDTO | null = null;
+	let retentionRunning = false;
+
+	async function runRetention() {
+		if (dirty) {
+			toast.info('Save your changes first', {
+				description: 'The job uses the saved retention settings.'
+			});
+			return;
+		}
+		retentionRunning = true;
+		try {
+			lastRetention = await runRetentionNow();
+			const { archived, purged } = lastRetention;
+			toast.success('Retention job finished', {
+				description: `${archived} archived, ${purged} permanently removed.`
+			});
+		} catch (err) {
+			toast.error("The retention job didn't run", { description: errorMessage(err) });
+		} finally {
+			retentionRunning = false;
+		}
+	}
 
 	const sections = [
 		{ id: 'general', label: 'General' },
@@ -403,6 +438,25 @@
 					</p>
 				</div>
 			</div>
+
+			<div class="border-border/60 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
+				<div class="text-sm">
+					<p class="font-medium">Retention job</p>
+					<p class="text-muted-foreground">
+						Runs hourly on the server. Documents in Pending or Reviewed are never auto-archived.
+						{#if lastRetention}
+							Last run <RelativeTime value={lastRetention.at} />: {lastRetention.archived} archived,
+							{lastRetention.purged} removed.
+						{:else}
+							Hasn't run since the server started.
+						{/if}
+					</p>
+				</div>
+				<Button variant="outline" size="sm" disabled={retentionRunning || !$settingsLoaded} onclick={runRetention}>
+					<Play class="h-4 w-4" />
+					{retentionRunning ? 'Running…' : 'Run now'}
+				</Button>
+			</div>
 		</section>
 
 		<!-- Roles & Permissions -->
@@ -668,10 +722,23 @@
 				Everything (settings, departments, users, documents, their files and the audit log) is
 				stored on the server, in the database file and the file storage folder.
 			</p>
+
+			<div class="mt-4 flex flex-wrap gap-2">
+				<Button variant="outline" size="sm" href={backupDownloadUrl()} download>
+					<Download class="h-4 w-4" /> Download backup
+				</Button>
+			</div>
+			<p class="text-muted-foreground mt-2 text-xs">
+				A <code>.tar.gz</code> with a consistent snapshot of the database and every stored file,
+				taken while the server keeps running. Large libraries take a while to download. Each backup
+				is recorded in the audit log.
+			</p>
+
 			<p class="border-border/60 bg-muted/40 text-muted-foreground mt-3 rounded-lg border p-3 text-xs">
-				Backups aren't available from this page yet. Until they are, the server administrator can
-				stop the server and copy its <code>data</code> folder (or the paths set in
-				<code>DATABASE_URL</code> and <code>STORAGE_DIR</code>).
+				<span class="text-foreground font-medium">To restore</span>, the server administrator stops
+				the server and runs <code>npm run db:restore -- &lt;backup file&gt; --yes</code> on it. The
+				current data is set aside, not deleted. Restoring replaces everything, so it isn't offered
+				from this page.
 			</p>
 		</section>
 
