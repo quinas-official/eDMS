@@ -7,7 +7,7 @@ It ships two ways, both backed by **one central server**:
 - **Web app**: a SvelteKit Node server that hosts the UI and a JSON API under `/api/*`.
 - **Desktop app**: a Tauri 2 app that bundles its own copy of the UI and talks to the same server over `/api/*`. *(in progress)*
 
-> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. The Documents, Departments, Users and Settings pages, login, the dashboard and the audit log use the API. **The Workflow board still uses page-local mock data** and is next.
+> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. Every page (dashboard, documents, workflow, departments, users, settings) and login use the API; no page uses mock data.
 
 ---
 
@@ -49,7 +49,7 @@ Rules the code follows:
 
 - Roles: `admin`, `editor`, `viewer`.
 - Permissions: `view`, `upload`, `approve`, `delete`. Settings holds a matrix that maps each role to its permissions. **Admins always get every permission**, so a bad edit to the matrix can't lock everyone out.
-- Users, departments and settings are admin-only (`isAdmin`).
+- Users, departments and settings are admin-only (`isAdmin`). The Workflow board is open to admins and anyone with `approve`; everyone else signed in gets the Documents page.
 - **Department scoping:** admins and anyone with `approve` see every department. Everyone else sees their own department's documents plus documents they own or are assigned to, and can file documents only under their own department.
 
 ### Data model (`src/lib/server/db/schema.ts`)
@@ -75,7 +75,7 @@ src/
     admin/                 app shell (sidebar layout)
       +page.svelte         dashboard (charts, quick actions)
       documents/           documents list, upload, versions, preview   ← on the API
-      workflow/            approval board (Draft → Pending → Reviewed → Approved)  ← still mock
+      workflow/            approval board (Draft → Pending → Reviewed → Approved / Rejected)  ← on the API
       departments/         department management                        ← on the API
       users/               user management                              ← on the API
       settings/            org settings, role matrix, audit log         ← on the API
@@ -188,11 +188,11 @@ Done:
 2. Auth, sessions, and one shared `can()` permission check
 3. Documents API with disk storage, versioning and department scoping
 4. Documents page moved onto the API; audit log API
-5. Dashboard, settings writes, departments and users on the API
+5. Dashboard, settings writes, departments, users and the workflow board on the API
 
 Next:
 
-6. Move the Workflow board onto the documents API
+6. Server-side backup, and retention jobs (auto-archive, purge deleted)
 7. Tauri static build, a server-address setting, and CORS. SvelteKit's production CSRF check rejects cross-origin multipart POSTs, so the Tauri origin must be added to `kit.csrf.trustedOrigins`.
 8. Tests and CI
 

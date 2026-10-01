@@ -1,5 +1,5 @@
 import type { AuthUser } from '$lib/auth/types';
-import { isAdmin } from '$lib/permissions';
+import { can, isAdmin } from '$lib/permissions';
 
 /**
  * Which `/admin` pages a user may open. This only decides what the UI shows;
@@ -7,13 +7,15 @@ import { isAdmin } from '$lib/permissions';
  * app's pages are bundled and never pass through the server's hooks.
  */
 
-/** Where non-admins land, and the only admin-area page they can open. */
+/** Where non-admins land, and the one admin-area page every signed-in user can open. */
 export const NON_ADMIN_HOME = '/admin/documents';
 
-const NON_ADMIN_PATHS = [NON_ADMIN_HOME];
+export const WORKFLOW_PATH = '/admin/workflow';
 
 export function canAccessPath(user: AuthUser | null, path: string): boolean {
 	if (!user) return false;
 	if (isAdmin(user)) return true;
-	return NON_ADMIN_PATHS.includes(path);
+	if (path === NON_ADMIN_HOME) return true;
+	// The approval board is for the people who move documents through it.
+	return path === WORKFLOW_PATH && can(user, 'approve');
 }
