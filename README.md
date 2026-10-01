@@ -7,7 +7,7 @@ It ships two ways, both backed by **one central server**:
 - **Web app**: a SvelteKit Node server that hosts the UI and a JSON API under `/api/*`.
 - **Desktop app**: a Tauri 2 app that bundles its own copy of the UI and talks to the same server over `/api/*`. *(in progress)*
 
-> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. The Documents, Departments and Settings pages, login, the dashboard and the audit log use the API. **Users and Workflow still use page-local mock data** and are being moved over one at a time.
+> **Status:** the backend (auth, sessions, permissions, documents, activity log, settings) is real and runs on SQLite. The Documents, Departments, Users and Settings pages, login, the dashboard and the audit log use the API. **The Workflow board still uses page-local mock data** and is next.
 
 ---
 
@@ -77,7 +77,7 @@ src/
       documents/           documents list, upload, versions, preview   ← on the API
       workflow/            approval board (Draft → Pending → Reviewed → Approved)  ← still mock
       departments/         department management                        ← on the API
-      users/               user management                              ← still mock
+      users/               user management                              ← on the API
       settings/            org settings, role matrix, audit log         ← on the API
     api/
       health/              GET: liveness check
@@ -85,6 +85,7 @@ src/
       documents/...        see the API table below
       departments/         GET: list (any user; ?details=true for admins), POST/PATCH/DELETE (admin)
       settings/            GET: the settings the server enforces; PUT (admin): validate, save, audit-log
+      users/               GET/POST (admin), PATCH/DELETE [id] (admin), GET assignable (editors, approvers)
       activity/            GET: system-wide audit log (admin)
   lib/
     api/                   typed client wrappers per resource (client.ts, documents.ts, …)
@@ -96,6 +97,7 @@ src/
       activity.ts          writing and listing the audit log
       settings.ts          loading, validating and saving settings
       departments.ts       department CRUD; refuses to delete one still in use
+      users.ts             user CRUD; last-admin and self-lockout guards, sign-out on password reset
     permissions/           can(), resolvePermissions(), isAdmin()
     auth/ settings/ departments/ documents/   client stores (server-backed) + UI types
     components/ui/         shadcn-style primitives (button, card, input, dialog, …)
@@ -186,11 +188,12 @@ Done:
 2. Auth, sessions, and one shared `can()` permission check
 3. Documents API with disk storage, versioning and department scoping
 4. Documents page moved onto the API; audit log API
+5. Dashboard, settings writes, departments and users on the API
 
 Next:
 
-5. Move the remaining pages off mocks: departments, users, workflow, dashboard, settings writes
-6. Tauri static build, a server-address setting, and CORS. SvelteKit's production CSRF check rejects cross-origin multipart POSTs, so the Tauri origin must be added to `kit.csrf.trustedOrigins`.
-7. Tests and CI
+6. Move the Workflow board onto the documents API
+7. Tauri static build, a server-address setting, and CORS. SvelteKit's production CSRF check rejects cross-origin multipart POSTs, so the Tauri origin must be added to `kit.csrf.trustedOrigins`.
+8. Tests and CI
 
 Later ideas: expiring access requests and approvals, full-text search over extracted text, archiving, a version rollback UI, email notifications, and a Postgres option.
