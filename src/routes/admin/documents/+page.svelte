@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import { page as pageStore } from '$app/stores';
 	import {
 		FileText,
 		Table,
@@ -114,11 +115,19 @@
 	let loading = true;
 	let listError = '';
 
-	let search = '';
-	let debouncedSearch = '';
-	let selectedDepartment = '';
-	let selectedStatus: DocumentStatus | '' = '';
-	let showDeleted = false;
+	// Links such as the dashboard's shortcuts can open the page pre-filtered:
+	// ?status=pending, ?deleted=true, ?search=HR-2026-001, ?departmentId=2.
+	const params = $pageStore.url.searchParams;
+	const initialStatus = params.get('status') as DocumentStatus | null;
+
+	let search = params.get('search')?.trim() ?? '';
+	let debouncedSearch = search;
+	let selectedDepartment = /^\d+$/.test(params.get('departmentId') ?? '')
+		? String(params.get('departmentId'))
+		: '';
+	let selectedStatus: DocumentStatus | '' =
+		initialStatus && STATUSES.includes(initialStatus) ? initialStatus : '';
+	let showDeleted = params.get('deleted') === 'true' && can($currentUser, 'delete');
 	let viewMode: 'table' | 'cards' = 'table';
 
 	// Any filter change goes back to the first page.
